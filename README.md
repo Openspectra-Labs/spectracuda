@@ -282,6 +282,51 @@ CPU-resident stages noted in `docs/architecture.md`) is still
 unvalidated — a T4 on Colab confirms CUDA correctness, not Jetson
 performance.
 
+A live two-node RF link — TWO physically separate Raspberry Pi 5 +
+PlutoSDR pairs (not the same-box two-Pluto self-test in `debug/
+two_pluto_qpsk_bind_test.py`), one transmitting, one receiving, over real
+air — has now run end to end (2026-08-30):
+
+- **`debug/pluto_tx_standalone_test.py`** (runs on the transmitting Pi):
+  builds one fixed 64-byte payload (`0x00..0x3F`) via `generate_frame()`
+  ONCE, self-checks it round-trips losslessly in an ideal (no-channel)
+  loopback before ever touching hardware, then re-sends that same
+  waveform via `sdr.tx()` every `--interval` (100ms in this run).
+- **`debug/pluto_rx_pingpong_test.py`** (runs on the receiving Pi):
+  a strict 2-slot double-buffer ("ping-pong") between a capture thread
+  (`rx.rx()`) and the decode thread (`rx_streaming()`, fed 2048-sample
+  chunks) — needed because `rx.rx()` alone is capture-bound at roughly
+  5.3-5.7 Msps regardless of configured rate over this Pluto/USB link,
+  and a plain queued producer/consumer let capture race ahead and build
+  up stale backlog under thread-scheduling jitter; the strict 1-buffer
+  bound fixed that (see `git log` on this file for the fuller
+  investigation, including a libiio `Buffer.__del__` shutdown segfault
+  root-caused via `PYTHONFAULTHANDLER` and fixed with an explicit
+  teardown). Verifies every decoded frame's bits against the known
+  payload byte-for-byte, not just a frame count.
+
+Both sides configured identically: `fft_size=256, n_pilot=8, n_data=216,
+cp_len=32, modem=qpsk, fec=rs_m8, fec1=conv_v27, crc=crc16,
+sync=schmidl_cox, cfo=schmidl_cox, channel_estimator=ls,
+equalizer=mmse`, `rate=4e6`, `freq=2.425e9`, `tx_gain=-10dB`,
+`rx_gain=60dB` (manual). Result, full output in **[`rx.log`](rx.log)**
+(468 decoded frames):
+
+| | count | rate |
+|---|---|---|
+| frames decoded | 468 | — |
+| `crc_valid` | 459 | 98.1% |
+| bytes exactly matched the known 64-byte payload | 463 | 98.9% |
+
+EVM: min 0.368, median 0.516, mean 0.562, max 2.971. RSSI: min 18.2dB,
+median 19.9dB, max 64.2dB (25 frames spiked above 30dB; none of them were
+among the 9 CRC failures — the failures sit in the normal 18.7-27.6dB
+range instead, so the spikes aren't implicated). Of the 9 CRC failures,
+5 were genuinely corrupted payloads (CRC correctly caught them) and 4
+had CRC fail despite the payload bytes still landing correct — a real
+demonstration of why `crc_valid` is checked independently rather than
+inferred from the decoded bytes looking right.
+
 ## Development
 
 ```sh
