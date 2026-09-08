@@ -13,6 +13,26 @@ context. Read `spectracuda/fec/fec.py`, `spectracuda/fec/viterbi.py`, and
 assumes and builds directly on those conventions rather than restating
 them in full.
 
+## Decode backends (added 2026-09-08, after this plan's original scope)
+
+`LDPCCode(variant, decoder="native")` (default, unchanged from the design
+below) or `LDPCCode(variant, decoder="aff3ct")` — an opt-in bridge to
+[AFF3CT](https://github.com/aff3ct/aff3ct)'s own C++ decoder via a
+persistent subprocess, dramatically faster than the pure numpy/cupy path
+below (that path has no SIMD acceleration at all — belief propagation's
+sparse, irregular structure doesn't suit hand-vectorizing the way Viterbi/
+Reed-Solomon's native acceleration does, see
+[`docs/fec-c-lib-acceleration.md`](fec-c-lib-acceleration.md)). `encode()`
+always uses this file's own systematic encoder regardless of `decoder=`;
+only `decode()` routes through the bridge. Requires `reference/aff3ct/`
+built locally first (`spectracuda/fec/_native_src/aff3ct_bridge/
+setup_aff3ct.sh`) — raises `Aff3ctUnavailable` with the exact build command
+if it isn't, never silently falls back to `"native"`. See
+`spectracuda/fec/_native_aff3ct.py` and
+`spectracuda/fec/_native_src/aff3ct_bridge/bridge_ldpc.cpp` for the full
+bridge design, including two real bugs found bit-exact-verifying it against
+this file's own `decode()`.
+
 ## Context
 
 `docs/todo.md` and `docs/liquid-dsp-api-inventory.md` currently list LDPC
@@ -204,7 +224,10 @@ synthesize LLRs from hard bits — functionally correct and a legitimate
 way to run BP, but it leaves real performance on the table compared to a
 future soft-input pathway. Document this in `ldpc.py`'s module docstring
 as a known, explicit limitation, same spirit as RS's
-Forney-vs-linear-solve tradeoff note.
+Forney-vs-linear-solve tradeoff note. This limitation is upstream of
+`decoder=` above — the AFF3CT bridge decodes the exact same BSC-`p`-derived
+LLR array the native path computes, not true channel soft output, so
+switching decoders changes decode *speed*, not this trade-off.
 
 ## Verification
 

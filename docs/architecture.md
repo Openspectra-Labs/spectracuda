@@ -150,6 +150,47 @@ regardless of the selected backend — GPU throughput doesn't help a tight
 feedback loop, and this boundary should stay explicit rather than be
 "optimized" onto GPU later without re-justifying it.
 
+## Native FEC acceleration
+
+A separate, CPU-only acceleration layer sits underneath `fec`'s
+`backend="numpy"` path, orthogonal to the `self.xp` numpy/cupy split
+above — full detail in [`docs/fec-c-lib-acceleration.md`](fec-c-lib-acceleration.md),
+summarized here:
+
+- **Viterbi (`conv_v27`) + Reed-Solomon (`rs_m8`)**: vendored C
+  (`libcorrect`, `spectracuda/fec/_native_src/libcorrect/`), compiled on
+  demand into a source-hash-keyed cached `.so`, dispatched **fully
+  transparently** — no constructor argument, `backend="numpy"` instances
+  just get faster. Portable C alone measures ~22x (Viterbi) / ~130x (RS)
+  over pure Python. On top of that: x86_64 gets a further ~2.5x from
+  SSE4.1 (vendored upstream, Viterbi-only, gated on a *runtime* CPUID-style
+  check — an SSE4.1 instruction on a CPU that lacks one is `SIGILL`, not a
+  catchable exception); AArch64 (Raspberry Pi 5) gets a further ~1.6x from
+  a from-scratch NEON port (no upstream NEON build exists) — written after
+  a first NEON attempt measured as a **2.1x regression**, a real example of
+  this project's "measured, not assumed" rule for anything promoted into
+  the dispatch chain. `backend="cupy"` instances never use any of this
+  (CPU-only code; the device round-trip would defeat the point).
+- **Hexagon DSP offload** (`spectracuda/fec/_native_hexagon.py`, for
+  QCS6490-class SoCs) — design scaffolding only, unconditionally inert on
+  every machine this has run on so far (no SDK/hardware in hand). Its own
+  module, not another `_native.py` branch, because it's a genuinely
+  different kind of thing: a separate cross-toolchain, a separate
+  execution domain (the DSP, not the CPU), reached via FastRPC rather than
+  a local call — which is why its batch-shape contract passes the *whole*
+  batch per call rather than looping per row the way SSE/NEON do.
+- **LDPC**: no SIMD port — belief propagation's sparse, irregular gather/
+  scatter shape doesn't suit hand-vectorizing the way Viterbi's fixed
+  trellis or RS's Galois-field arithmetic did. Instead, an **opt-in**
+  bridge to [AFF3CT](https://github.com/aff3ct/aff3ct) (`LDPCCode(variant,
+  decoder="aff3ct")`, `spectracuda/fec/_native_aff3ct.py`) — a mature,
+  already-SIMD, syndrome-early-terminating external decoder, driven via a
+  persistent subprocess rather than a fourth from-scratch native port.
+  Unlike the transparent libcorrect path, this fails loud
+  (`Aff3ctUnavailable`) rather than silently falling back, since it's an
+  explicit request, not an automatic optimization of an already-chosen
+  backend.
+
 ## Batch-shape contract
 
 Every Layer 1/2 block's `process()`/`__call__` operates on a batch dimension
