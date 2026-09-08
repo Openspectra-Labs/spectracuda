@@ -63,6 +63,7 @@ book/roadmap
 :caption: Reference
 
 architecture
+fec-c-lib-acceleration
 mac
 ldpc
 liquid-dsp-api-inventory
