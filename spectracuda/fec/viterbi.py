@@ -48,6 +48,7 @@ from ._native import (
     neon_available,
     sse_available,
 )
+from ._native_hexagon import NativeConvolutionalHexagon, hexagon_available
 
 _K = 7
 _G1 = 0o171  # NASA/CCSDS standard rate-1/2 K=7 generator polynomials
@@ -127,7 +128,26 @@ class ConvolutionalCode(Block):
         # the 3.72-3.80ms portable build (not just faster than the
         # first NEON attempt), so unlike that first attempt this one
         # earns being wired in here.
-        if self.backend == "numpy" and sse_available():
+        # Hexagon DSP offload (QCS6490/Radxa Q6A) -- see
+        # fec/_native_hexagon.py's own module docstring and
+        # docs/hexagon-fec-offload-plan.md for the full design. Checked
+        # FIRST, ahead of SSE/NEON, on the a priori theory that HVX's
+        # 1024-bit vectors (8x NEON's 128-bit) should win the same
+        # ACS-inner-loop speedup NEON already proved out, scaled up --
+        # but that is a HYPOTHESIS, not yet measured, and
+        # hexagon_available() is unconditionally False on every machine
+        # this has actually run on (no compiled/deployed DSP skel
+        # exists yet). This ordering is provably inert until that
+        # changes; do NOT reorder it ahead of SSE/NEON's own measured
+        # wins based on this comment alone -- re-benchmark against both
+        # once NativeConvolutionalHexagon is actually implemented, same
+        # "measured, not assumed" rule the NEON promotion was held to
+        # (see this file's own comment further down on the two NEON
+        # attempts), and only then decide where it actually belongs in
+        # this chain.
+        if self.backend == "numpy" and hexagon_available():
+            self._native = NativeConvolutionalHexagon()
+        elif self.backend == "numpy" and sse_available():
             self._native = NativeConvolutionalSSE()
         elif self.backend == "numpy" and neon_available():
             self._native = NativeConvolutionalNEON()

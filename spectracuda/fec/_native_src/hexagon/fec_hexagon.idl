@@ -1,0 +1,56 @@
+// FastRPC interface sketch for offloading conv_v27 Viterbi decode to
+// the Hexagon DSP (QCS6490/Radxa Q6A). See
+// docs/hexagon-fec-offload-plan.md for the full plan.
+//
+// *** NOT COMPILED. *** This repo has no FastRPC/IDL sample material to
+// check syntax against -- reference/qc6490/Hexagon_DSP_programming/ is
+// plain hexagon-clang example programs (intrinsics, direct
+// compile+hexagon-sim), not remote-procedure-call samples, and no
+// FastRPC documentation was downloaded into reference/qc6490/docs/
+// (those PDFs are HVX-ISA-reference and product-brief material only).
+// This sketch follows the general shape of Qualcomm's publicly
+// documented FastRPC IDL pattern (array-plus-length buffer parameters,
+// `remote_handle64`-style open/close lifecycle) from general knowledge
+// of the Hexagon SDK, NOT from a verified local example -- run this
+// through the real `qaic` compiler from the Hexagon SDK and fix
+// whatever it rejects before trusting the syntax below.
+
+interface fec_hexagon {
+    // Opens one persistent correct_convolutional_hexagon instance on
+    // the DSP (mirrors NativeConvolutional.__init__'s
+    // correct_convolutional_create() call in fec/_native.py, just
+    // across the RPC boundary) and returns an opaque handle. `handle`
+    // stays valid until close() -- one open()/close() pair per
+    // NativeConvolutionalHexagon Python instance, not per encode()/
+    // decode() call (same "persistent instance, reused across calls"
+    // rule every other Native* class in fec/_native.py already
+    // follows).
+    long open(out int64_t handle);
+
+    // Releases the handle from open(). Idempotent-on-error is NOT
+    // assumed here -- calling this twice on the same handle is
+    // undefined, same discipline a raw malloc/free pair would need.
+    long close(in int64_t handle);
+
+    // Batched decode: `encoded` holds n_batch rows of
+    // num_encoded_bits_per_row bits each, densely packed row-major
+    // (see correct_convolutional_hexagon_decode_batch()'s own C
+    // comment in hexagon/decode.c for the exact byte layout);
+    // `decoded` is filled with n_batch rows of msg_bits_per_row bits
+    // each, same layout. ONE call covers the WHOLE batch -- see
+    // fec/_native_hexagon.py's module docstring, "WHY BATCHING IS NOT
+    // OPTIONAL HERE", for why this must never be called once per row.
+    // Returns 0 on success, negative if the underlying C call failed
+    // (see correct_convolutional_hexagon_decode_batch()'s own
+    // contract -- collapses ALL per-row failures into one pass/fail,
+    // a known simplification worth revisiting once real error-rate
+    // testing on hardware says whether per-row granularity is needed).
+    long decode_batch(
+        in int64_t handle,
+        in sequence<uint8_t> encoded,
+        in int32_t n_batch,
+        in int32_t num_encoded_bits_per_row,
+        in int32_t msg_bits_per_row,
+        rout sequence<uint8_t> decoded
+    );
+};
