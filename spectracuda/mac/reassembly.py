@@ -21,7 +21,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from .pdu import SI_FIRST, SI_FULL, SI_LAST, SI_MIDDLE, sn_add
+from .pdu import SI_FIRST, SI_FULL, SI_LAST, SI_MIDDLE, sn_add, sn_precedes
 
 
 class Segmenter:
@@ -125,6 +125,26 @@ class ReassemblyBuffer:
         list for generality) -- draining as many contiguous, complete
         SDUs as the newly-arrived segment unblocks."""
         segment_bits = np.asarray(segment_bits, dtype="uint8")
+        # Real bug found and fixed here: a segment whose SN has already
+        # been cumulatively delivered (sn_precedes(sn, self._expected_sn))
+        # is a STALE duplicate -- e.g. a retransmission that arrives late,
+        # after this same SN was already popped and delivered once. Before
+        # this check existed, such a segment was inserted into _pending
+        # unconditionally and never cleared, since normal delivery only
+        # pops entries AT OR AFTER _expected_sn. If a later persistent gap
+        # then triggers this class's own window-overflow "give up and
+        # resync to min(self._pending)" (right below), that stale leftover
+        # entry could BE the minimum -- rewinding _expected_sn BACKWARD and
+        # re-delivering already-completed SDUs a second time. Reproduced
+        # directly (deliver SN 0..5, re-ingest a late duplicate of SN 0,
+        # then enough new traffic with a persistent gap to force a resync)
+        # before writing this fix, not assumed: expected_sn rewound 6->1
+        # and SN 0's content was handed to the caller twice. Dropping a
+        # stale duplicate here, rather than letting it linger, is the
+        # correct fix -- sn==self._expected_sn (not yet delivered) and
+        # anything AHEAD of it still insert normally, unchanged.
+        if sn_precedes(sn, self._expected_sn):
+            return []
         self._pending[sn] = (si, so, segment_bits)
 
         if len(self._pending) > self.window_size and self._expected_sn not in self._pending:
