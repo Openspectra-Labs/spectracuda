@@ -34,6 +34,14 @@ venv/
 # the other reference/ clones above.
 /reference/aff3ct/
 
+# bridge_ldpc's own build byproducts (spectracuda/fec/_native_src/
+# aff3ct_bridge/build.sh) -- links in AFF3CT's entire static library
+# (~26MB), same "local build artifact, not shipped source" status as
+# the reference/aff3ct/ it's built from; only the .cpp/qc_export.py/
+# build.sh/verify_bridge.py sources in that directory are tracked.
+/spectracuda/fec/_native_src/aff3ct_bridge/bridge_ldpc
+/spectracuda/fec/_native_src/aff3ct_bridge/bridge_ldpc.o
+
 # Sphinx build output (spectracuda.readthedocs.io builds this itself) --
 # regenerate locally with `.venv/bin/python -m sphinx -b html docs docs/_build/html`.
 /docs/_build/

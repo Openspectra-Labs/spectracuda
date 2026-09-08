@@ -188,15 +188,39 @@ class LDPCCode(Block):
         full list of 12 variant names as exposed through `FEC`.
     max_iterations:
         Default number of normalized min-sum BP iterations; overridable
-        per `decode()` call.
+        per `decode()` call. Ignored when decoder="aff3ct" (AFF3CT runs
+        its own fixed 50-iteration NMS/BP_FLOODING with syndrome-based
+        early termination -- see fec/_native_src/aff3ct_bridge/
+        bridge_ldpc.cpp).
+    decoder:
+        "native" (default): this class's own numpy/cupy min-sum BP,
+        always available. "aff3ct": bridge to AFF3CT's C++ decoder via a
+        persistent subprocess (see fec/_native_aff3ct.py) -- dramatically
+        faster (spectracuda's own numpy decode is the slow reference
+        point; see examples/benchmark_x86_stages_ldpc_aff3ct.py), but
+        requires reference/aff3ct/ built locally first; raises
+        Aff3ctUnavailable with clear build instructions if it isn't,
+        never silently falls back to "native". Decode-only: encode()
+        always uses this class's own systematic encoder regardless of
+        this setting.
     """
 
-    def __init__(self, variant: str, *, max_iterations: int = _DEFAULT_MAX_ITERATIONS, backend=None) -> None:
+    def __init__(
+        self,
+        variant: str,
+        *,
+        max_iterations: int = _DEFAULT_MAX_ITERATIONS,
+        backend=None,
+        decoder: str = "native",
+    ) -> None:
         super().__init__(backend=backend)
         if variant not in BASE_MATRICES:
             raise ValueError(f"Unknown LDPC variant {variant!r}; expected one of {sorted(BASE_MATRICES)}")
+        if decoder not in ("native", "aff3ct"):
+            raise ValueError(f"decoder must be 'native' or 'aff3ct', got {decoder!r}")
         self.variant = variant
         self.max_iterations = max_iterations
+        self.decoder = decoder
         xp = self.xp
 
         spec = BASE_MATRICES[variant]
@@ -358,6 +382,23 @@ class LDPCCode(Block):
             # value (p describes real channel noise; these bits never
             # touched the channel at all).
             channel_llr[:, :n_shortened] = pad_mag
+
+        if self.decoder == "aff3ct":
+            # Bridge is CPU/numpy-only (a subprocess, not a GPU kernel) --
+            # pull off the GPU first if this instance's own backend is
+            # cupy. AFF3CT does its own syndrome check + early termination
+            # internally (see _native_aff3ct.decode_batch(), which raises
+            # ValueError on non-convergence exactly like the native path
+            # below does) -- no separate syndrome/BP loop needed here.
+            from . import _native_aff3ct
+
+            llr_host = np.asarray(
+                channel_llr if self.backend != "cupy" else self._to_host(channel_llr), dtype="float32"
+            )
+            decoded_k = _native_aff3ct.decode_batch(self.variant, self.n, self.k, llr_host)  # (n_batch, k) uint8
+            decoded_k = xp.asarray(decoded_k)
+            return decoded_k[:, n_shortened : self.k]
+
         var_mask_f = self._var_slot_mask.astype("float32")
         check_mask = self._check_slot_mask
 
