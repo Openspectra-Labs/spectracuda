@@ -44,7 +44,7 @@ the link doesn't change. The same object graph runs on a plain CPU
 (`backend="numpy"`, no GPU required) or a Jetson/CUDA GPU (`backend="cupy"`)
 with no code change beyond that one string, and this exact link design has
 been run and validated over the air on real PlutoSDR hardware, not only in
-simulation.
+simulation — see {doc}`hardware-validation` for the actual numbers.
 
 GPU-accelerated, liquid-dsp-inspired SDR PHY (+ MAC) framework for NVIDIA
 Jetson (Orin Nano first, NX/AGX Orin and desktop CUDA GPUs as additional
@@ -97,6 +97,13 @@ the MAC layer behind the `MacLink` example above, or the
 instructions and every swappable strategy.
 
 ```{toctree}
+:maxdepth: 1
+:caption: Real-World Validation
+
+hardware-validation
+```
+
+```{toctree}
 :maxdepth: 2
 :caption: The OFDM Field Guide — Part I
 
@@ -115,6 +122,7 @@ book/roadmap
 
 architecture
 fec-c-lib-acceleration
+hexagon-fec-offload-plan
 mac
 ldpc
 liquid-dsp-api-inventory
