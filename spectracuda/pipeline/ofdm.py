@@ -294,6 +294,7 @@ class Ofdm(Block):
         backend: Optional[BackendName] = None,
         iq_dtype: str = "float32",
         sync_threshold: Optional[float] = None,
+        strict_fec_check: bool = False,
     ) -> None:
         if fec != "none" and fec not in _FEC_SCHEME_CODES:
             raise ValueError(
@@ -331,6 +332,28 @@ class Ofdm(Block):
         self.fec = fec
         self.fec1 = fec1
         self.crc = crc
+        # Off by default -- preserves this class's existing, deliberately-
+        # tested "receiver is a separate device that never saw the
+        # transmitter's Ofdm(...) call, decode fec0/fec1 from the header
+        # alone" behavior (see tests/test_ofdm_class.py's
+        # test_rx_process_resolves_*_fec0_from_header_not_self_fec_codec
+        # and the LDPC/two-stage end-to-end tests). Opt into True for a
+        # receiver that should instead reject any decoded fec0/fec1 not
+        # equal to this object's own self.fec/self.fec1 -- see
+        # _decode_header_from_sync()'s own comment for why: it stops a
+        # false sync detection (SEEKING triggering on noise, no real
+        # frame at all) from constructing a fresh, potentially-expensive
+        # codec (LDPC's GF(2) matrix inversion above all -- measured as a
+        # real multi-hundred-ms-to-multi-second stall on a Raspberry Pi
+        # 5, see debug/pluto_rx_standalone_test.py) for a scheme this
+        # receiver was never going to legitimately see. True is the right
+        # choice for a receiver whose peer is known in advance to always
+        # use this exact fec/fec1 (e.g. this project's drone link, whose
+        # own adaptive-MCS controller -- examples/drone_tui/
+        # adaptive_mcs.py -- never varies fec/fec1 at all); leave False
+        # for a receiver that must stay generic across arbitrarily-
+        # configured senders.
+        self.strict_fec_check = strict_fec_check
         # interleaver choice is a deliberate EXCEPTION to the "resolve
         # from the wire" rule below -- it's never signaled in the
         # header (liquid-dsp doesn't signal its own interleaver's
@@ -545,12 +568,29 @@ class Ofdm(Block):
            Changing only what actually changed avoids paying it on every
            MCS transition for parameters that didn't move.
 
-        The RX side needs no corresponding change at all: rx_process()
-        already resolves mod_scheme/fec0/fec1 from the DECODED header,
-        never from self (see class docstring) -- a peer running an
-        unmodified Ofdm decodes a scheme-switched frame exactly as it
-        would any other frame from a DIFFERENT sender using a different
-        scheme, because that's the same code path either way.
+        A modem-only change needs no corresponding RX-side action:
+        rx_process()/rx_streaming() resolve mod_scheme from the DECODED
+        header, never from self, so an unmodified peer keeps decoding
+        fine, regardless of strict_fec_check (see __init__). A fec/fec1
+        change is DIFFERENT for a receiver constructed with
+        strict_fec_check=True: _decode_header_from_sync() rejects
+        (raises ValueError) any decoded fec0/fec1 that doesn't equal
+        that receiver's own self.fec/self.fec1 -- see __init__'s own
+        comment for why (constructing a codec, LDPC's GF(2) matrix
+        inversion above all, for whatever a false sync detection
+        decodes out of pure noise is a real, measured multi-hundred-ms-
+        to-multi-second stall on real hardware). A strict_fec_check=True
+        receiver whose peer DOES negotiate fec/fec1 changes over the air
+        (e.g. via LINK_QUALITY-driven scheme selection) must have
+        reconfigure_tx_scheme() called on BOTH ends' Ofdm -- the
+        sender's to change what it transmits, the receiver's to accept
+        what it now expects to decode -- not just the sender's. This
+        project's own adaptive-MCS controller, examples/drone_tui/
+        adaptive_mcs.py, sidesteps the whole question by only ever
+        varying modem, never fec/fec1.
+        A strict_fec_check=False receiver (the default) is unaffected by
+        any of this -- it keeps resolving fec0/fec1 from the header
+        alone, same as always.
 
         Returns the (possibly unchanged) `self.bits_per_ofdm_symbol` --
         callers with their own segmentation math derived from it (e.g.
@@ -859,6 +899,7 @@ class Ofdm(Block):
         p = self._decode_payload_from_header(
             h["rx_corrected"], h["pos"], h["h_hat_data"], h["payload_modem"],
             h["payload_packetizer"], h["encoded_bit_count"], h["n_payload_symbols"],
+            h["h_hat_pilots"],
         )
 
         return {
@@ -873,6 +914,7 @@ class Ofdm(Block):
             "bits": p["bits"],
             "crc_valid": p["crc_valid"],
             "evm": p["evm"],
+            "symbol_diagnostics": p.get("symbol_diagnostics"),  # TEMP diagnostic, see _decode_payload_from_header()
         }
 
     def _decode_header_from_sync(self, rx_iq: Any, start_index: Any, n_payload_symbols: Optional[int] = None) -> Dict[str, Any]:
@@ -897,6 +939,12 @@ class Ofdm(Block):
         pos = start_index + self.fft_size  # preamble has no CP -- see class docstring
 
         h_hat_data_sum = None
+        h_hat_pilots_sum = None  # mirrors h_hat_data_sum -- needed by _decode_payload_from_header()'s
+        # per-symbol CPE correction below, to equalize the payload's OWN pilot
+        # subcarriers the same way h_hat_data equalizes the data subcarriers.
+        # See that method's own comment for why this is necessary (not just
+        # h_hat_data reused at different indices -- the channel estimate
+        # itself genuinely differs per subcarrier).
         for _ in range(self.n_training_symbols):
             train_slot = self._extract_slot(rx_corrected, pos, self.slot_len)
             pos = pos + self.slot_len
@@ -904,8 +952,11 @@ class Ofdm(Block):
             train_rx_known = train_rx_grid[:, self._train_known_indices]
             h_hat_full = self.channel_estimator.process(train_rx_known)
             h_hat_data = h_hat_full[:, self.grid.data_indices]
+            h_hat_pilots = h_hat_full[:, self.grid.pilot_indices]
             h_hat_data_sum = h_hat_data if h_hat_data_sum is None else h_hat_data_sum + h_hat_data
+            h_hat_pilots_sum = h_hat_pilots if h_hat_pilots_sum is None else h_hat_pilots_sum + h_hat_pilots
         h_hat_data = h_hat_data_sum / self.n_training_symbols
+        h_hat_pilots = h_hat_pilots_sum / self.n_training_symbols
 
         header_bits_chunks = []
         for _ in range(self.num_symbols_header):
@@ -917,19 +968,55 @@ class Ofdm(Block):
             header_bits_chunks.append(self.header_modem.demodulate(header_equalized))
         header_fields = self._decode_header_symbols(xp.concatenate(header_bits_chunks, axis=-1))
 
-        # Dynamically resolve the payload's modem AND crc/fec0/fec1
-        # composition from the DECODED header -- not from
-        # self.modem/self.packetizer. A real receiver is a separate
-        # device that never saw this object's constructor call (see
-        # class docstring). The Packetizer built here is throwaway/
-        # rx-only, mirroring self.packetizer's tx-side role but for
-        # whatever crc/fec0/fec1 the wire actually says -- EXCEPT
-        # interleaver, which is deliberately NOT resolved from the
-        # header (it's never signaled there -- see self.interleaver's
-        # own comment above and framing/packetizer.py's module
-        # docstring): this receiver must already be configured with the
-        # matching interleaver out-of-band, so THIS object's own
-        # self.interleaver/self.interleaver_kwargs are used here.
+        # strict_fec_check (see __init__'s own comment): reject any
+        # decoded fec0/fec1 this receiver wasn't itself configured for,
+        # BEFORE touching the codec cache/construction below -- cheap
+        # (two attribute comparisons), and it's what stops a false sync
+        # detection (SEEKING triggering on plain noise, no peer
+        # transmitting at all) from decoding garbage header bits into a
+        # random-but-VALID fec0 code -- FEC_SCHEME_CODES has 17 entries,
+        # 12 of them LDPC variants, so most such garbage draws land on
+        # one -- and paying for a full LDPCCode construction (GF(2)
+        # matrix inversion + edge-index tables, up to ~1.6s measured on
+        # a Pi 5 for the largest 1944-bit variant) to decode a frame
+        # that was never really there. Real-hardware root cause:
+        # debug/pluto_rx_standalone_test.py showed random multi-hundred-
+        # ms-to-multi-second rx_streaming() stalls with no TX active at
+        # all; profiled to LDPCCode.__init__ via _rx_payload_codec_cache
+        # thrashing on every such false positive (single-entry cache,
+        # keyed on the noise-derived fec0/fec1, essentially never hits).
+        #
+        # Off by default: the class's existing, deliberately-tested
+        # "receiver never needs to have seen the transmitter's own
+        # Ofdm(...) call" generality (tests/test_ofdm_class.py's
+        # dynamic-fec0-resolution tests) is preserved unless a caller
+        # opts in.
+        if self.strict_fec_check and (
+            header_fields["fec0"] != self.fec or header_fields["fec1"] != self.fec1
+        ):
+            raise ValueError(
+                f"decoded header fec0={header_fields['fec0']!r}/fec1={header_fields['fec1']!r} "
+                f"doesn't match this receiver's configured fec={self.fec!r}/fec1={self.fec1!r} "
+                f"-- rejecting before constructing a codec for it (strict_fec_check=True; "
+                f"likely a false sync detection decoding noise, not a real frame from a "
+                f"differently-configured peer)"
+            )
+
+        # Dynamically resolve the payload's modem AND crc composition
+        # from the DECODED header -- not from self.modem/self.packetizer.
+        # A real receiver is a separate device that never saw this
+        # object's constructor call (see class docstring). The
+        # Packetizer built here is throwaway/rx-only, mirroring
+        # self.packetizer's tx-side role but for whatever crc/fec0/fec1
+        # the wire actually says (fec0/fec1 already validated to match
+        # self.fec/self.fec1 above, so this is never a surprising
+        # scheme in practice) -- EXCEPT interleaver, which is
+        # deliberately NOT resolved from the header (it's never signaled
+        # there -- see self.interleaver's own comment above and
+        # framing/packetizer.py's module docstring): this receiver must
+        # already be configured with the matching interleaver out-of-
+        # band, so THIS object's own self.interleaver/self.interleaver_kwargs
+        # are used here.
         codec_key = (header_fields["mod_scheme"], header_fields["crc"], header_fields["fec0"], header_fields["fec1"])
         cached = self._rx_payload_codec_cache
         if cached is not None and cached[0] == codec_key:
@@ -989,6 +1076,7 @@ class Ofdm(Block):
             "cfo_estimate": cfo_estimate,
             "rx_corrected": rx_corrected,
             "h_hat_data": h_hat_data,
+            "h_hat_pilots": h_hat_pilots,
             "header_fields": header_fields,
             "payload_modem": payload_modem,
             "payload_packetizer": payload_packetizer,
@@ -1000,6 +1088,7 @@ class Ofdm(Block):
     def _decode_payload_from_header(
         self, rx_corrected: Any, pos: Any, h_hat_data: Any, payload_modem: Any,
         payload_packetizer: Any, encoded_bit_count: int, n_payload_symbols: int,
+        h_hat_pilots: Any = None,
     ) -> Dict[str, Any]:
         """Payload extraction through FEC-decode/CRC-check/EVM -- the
         other half of rx_process(), extracted for the same reuse reason
@@ -1052,7 +1141,117 @@ class Ofdm(Block):
         combined_rx_data = self.grid.extract_data(xp, combined_rx_grid)
         h_hat_combined = xp.repeat(h_hat_data, n_payload_symbols, axis=0)  # batch-major/symbol-minor, matches combined_slots' own row order
         equalized_combined = self.equalizer.process(combined_rx_data, channel_est=h_hat_combined)
-        demod_bits_combined = payload_modem.demodulate(equalized_combined)  # (n_batch*n_payload_symbols, bits_per_symbol_payload) -- UNTRUNCATED
+
+        # Per-symbol common-phase-error (CPE) correction using the payload's
+        # OWN pilot subcarriers -- fixes the root cause found while root-
+        # causing the 1024B-payload payload_fail losses (see docs/2026-09-06-
+        # rx-packet-loss-and-ism-band-characterization.md and this session's
+        # stream_debug_counts/symbol_diagnostics work): h_hat_data/h_hat_combined
+        # above is ONE estimate taken from the training symbol(s) and reused,
+        # unmodified, for every payload symbol -- any residual CFO left over
+        # from the one-shot Schmidl-Cox estimate (never exactly zero) then
+        # accumulates phase error roughly linearly for as long as the frame
+        # keeps running. Real-hardware evidence this is real, not
+        # theoretical: on failing 1024B frames, EVM peaked at the SAME
+        # relative symbol position across independent frames (not random,
+        # as external interference would be) and the accumulated pilot phase
+        # drift had a CONSISTENT sign across independent frames (not random,
+        # as noise would be) -- both are the signature of a systematic,
+        # roughly-constant residual frequency error, not chance collisions.
+        # A short (64B) payload never runs long enough for this to
+        # accumulate into anything damaging; a long (1024B) one does.
+        #
+        # Always-on (no flag): in a channel with zero residual CFO this
+        # measures ~0 and rotates nothing, so it's a strict improvement over
+        # "just repeat the training estimate," never a regression.
+        #
+        # Equalize the pilots through the SAME equalizer abstraction used for
+        # data (h_hat_pilots is the pilot-subcarrier counterpart of h_hat_data,
+        # accumulated identically in _decode_header_from_sync()) rather than
+        # comparing raw, unequalized pilot samples -- the static channel gain
+        # at the pilot subcarriers is not 1.0 in general, so skipping this
+        # would fold channel response into what's supposed to be a pure
+        # drift measurement.
+        pilots_rx_combined = self.grid.extract_pilots(xp, combined_rx_grid)  # (n_batch*n_payload_symbols, n_pilot)
+        if h_hat_pilots is not None:
+            h_hat_pilots_combined = xp.repeat(h_hat_pilots, n_payload_symbols, axis=0)
+            equalized_pilots = self.equalizer.process(pilots_rx_combined, channel_est=h_hat_pilots_combined)
+        else:
+            # Backward-compat fallback for any direct caller still on the old
+            # signature (h_hat_pilots wasn't a parameter before) -- degrades
+            # to comparing raw pilot samples, which is what the diagnostic-
+            # only code path did before this correction existed.
+            equalized_pilots = pilots_rx_combined
+        tx_pilots_combined = xp.tile(self.pilot_values, (equalized_pilots.shape[0], 1))
+        pilot_ratio = equalized_pilots / tx_pilots_combined  # ideally 1+0j per pilot when there's no drift at all
+        pilot_ratio_mean = xp.mean(pilot_ratio, axis=-1)  # (n_batch*n_payload_symbols,) -- coherent average across the n_pilot subcarriers
+        cpe_per_symbol = xp.angle(pilot_ratio_mean)
+        # Reliability gate: xp.abs(pilot_ratio_mean) is close to 1 when the
+        # n_pilot individual phases agree (a real, trustworthy CPE); it
+        # collapses toward 0 when they're scattered (a deep fade or heavy
+        # local corruption on that one symbol) -- averaging near-random
+        # phases toward zero, NOT a trustworthy phase estimate. Leave such a
+        # symbol's data uncorrected (0 rotation) rather than applying a
+        # spurious one derived from noise. Threshold is deliberately low
+        # (0.05) -- this should only exclude genuinely-degenerate cases, not
+        # add its own bias on ordinary symbols.
+        pilot_reliable = xp.abs(pilot_ratio_mean) > 0.05
+        cpe_to_apply = xp.where(pilot_reliable, cpe_per_symbol, xp.zeros_like(cpe_per_symbol))
+        if getattr(self, "debug_disable_cpe_correction", False):
+            # A/B kill-switch, off by default (correction stays always-on for
+            # every normal caller) -- exists so a real deployment (or a test)
+            # can directly compare against the pre-fix "just repeat the
+            # training estimate" behavior without reverting code.
+            cpe_to_apply = xp.zeros_like(cpe_to_apply)
+        equalized_combined = equalized_combined * xp.exp(-1j * cpe_to_apply)[:, None]
+
+        demod_bits_combined = payload_modem.demodulate(equalized_combined)  # (n_batch*n_payload_symbols, bits_per_symbol_payload) -- UNTRUNCATED, POST-CPE-correction
+
+        # TEMP diagnostic (same root-causing effort as the CPE correction
+        # above -- see docs/2026-09-06-rx-packet-loss-and-ism-band-
+        # characterization.md and this session's own stream_debug_counts
+        # diagnostic): opt-in (self.debug_payload_symbols, default False,
+        # zero cost otherwise) per-OFDM-SYMBOL readouts, now reusing
+        # pilot_ratio computed above (properly pilot-equalized) rather than
+        # recomputing it raw:
+        #   - evm_per_symbol: same normalized-RMS-EVM definition as the
+        #     aggregate `evm` field (framing/stats.py), just not averaged
+        #     across symbols first -- POST-correction now, so this measures
+        #     residual quality after the CPE fix above, not the raw drift.
+        #   - pilot_cpe_per_symbol / cpe_applied_per_symbol: the raw measured
+        #     CPE and the (possibly gated-to-zero) value actually applied --
+        #     kept distinct so a real run can confirm the gate isn't firing
+        #     on ordinary symbols.
+        #   - pilot_timing_slope_per_symbol: least-squares slope of pilot
+        #     phase against PILOT SUBCARRIER INDEX (not symbol index), per
+        #     symbol -- a residual timing/sample-clock offset shows up as a
+        #     phase ramp across FREQUENCY within one symbol, distinct from
+        #     CFO's ramp across time. This is NOT corrected by the CPE fix
+        #     above (that's a per-symbol scalar rotation only) -- still worth
+        #     watching for whether it's a separate, remaining contributor.
+        symbol_diagnostics = None
+        if getattr(self, "debug_payload_symbols", False):
+            ideal_for_evm = payload_modem.modulate(demod_bits_combined)
+            evm_per_symbol = compute_evm(xp, equalized_combined, ideal_for_evm)
+            pilot_ratio_host = self._to_host(pilot_ratio)  # host-side for np.unwrap below
+            pilot_idx = np.asarray(self._to_host(self.grid.pilot_indices), dtype=float)
+            pilot_idx_centered = pilot_idx - pilot_idx.mean()
+            denom = float(np.sum(pilot_idx_centered ** 2))
+            phase_unwrapped = np.unwrap(np.angle(pilot_ratio_host), axis=-1)
+            pilot_timing_slope_per_symbol = (phase_unwrapped @ pilot_idx_centered) / denom if denom > 0 else np.zeros(phase_unwrapped.shape[0])
+            symbol_diagnostics = {
+                "evm_per_symbol": self._to_host(evm_per_symbol),
+                "pilot_cpe_per_symbol": self._to_host(cpe_per_symbol),
+                "cpe_applied_per_symbol": self._to_host(cpe_to_apply),
+                "pilot_timing_slope_per_symbol": pilot_timing_slope_per_symbol,
+            }
+        # Stashed on self, not just returned, because payload_packetizer.decode()
+        # a few lines below can raise ValueError (an uncorrectable codeword --
+        # the exact payload_fail case this diagnostic exists to explain) before
+        # this function ever reaches its own `return` -- rx_streaming()'s
+        # WAITING_PAYLOAD except-block (below) reads this attribute to recover
+        # per-symbol data for a frame that FAILED, not just ones that succeeded.
+        self._last_payload_symbol_diagnostics = symbol_diagnostics
 
         n_data = equalized_combined.shape[-1]
         bits_per_symbol_payload = demod_bits_combined.shape[-1]
@@ -1087,7 +1286,7 @@ class Ofdm(Block):
         ideal_flat = ideal_combined.reshape(n_batch, n_payload_symbols * n_data)
         evm = compute_evm(xp, equalized_flat, ideal_flat)
 
-        return {"bits": raw_bits, "crc_valid": crc_valid, "evm": evm}
+        return {"bits": raw_bits, "crc_valid": crc_valid, "evm": evm, "symbol_diagnostics": symbol_diagnostics}
 
     # -- streaming receiver ----------------------------------------------
     # rx_process() (above) assumes the caller already has one complete,
@@ -1132,6 +1331,23 @@ class Ofdm(Block):
         self._stream_buffer = xp.zeros((1, 0), dtype="complex64")
         self._stream_frame_start = None
         self._stream_header: Optional[Dict[str, Any]] = None
+        # TEMP diagnostic (root-causing 1024B-payload real-RF loss, see
+        # docs/2026-09-06-rx-packet-loss-and-ism-band-characterization.md
+        # -- remove once that investigation is closed out): counts WHERE
+        # rx_streaming() gives up on a candidate frame, to distinguish
+        # "never even triggered on a real preamble" from "triggered, but
+        # header decode failed" from "header ok, but payload/FEC decode
+        # failed" -- the last one is the signature of mid-frame burst
+        # corruption (more exposure on a longer/higher-order frame),
+        # the first two are the signature of the sync-collision mechanism.
+        self.stream_debug_counts = {"sync_triggers": 0, "header_fail": 0, "payload_fail": 0}
+        # TEMP diagnostic (see _decode_payload_from_header()'s own comment for
+        # the full rationale): per-symbol EVM/pilot-phase/pilot-timing-slope
+        # data for every FAILED payload decode this stream has seen so far --
+        # only populated when self.debug_payload_symbols is set True (default
+        # False, zero cost). Appended to, never cleared automatically -- caller
+        # reads/clears it between runs.
+        self.stream_failed_symbol_diagnostics: list = []
 
     def rx_streaming(self, chunk: Any) -> Optional[Dict[str, Any]]:
         """Feed one arbitrary-sized chunk of IQ samples (any length, any
@@ -1177,6 +1393,7 @@ class Ofdm(Block):
             if metric >= self.sync_threshold:
                 self._stream_frame_start = int(np.asarray(self._to_host(sync_result["start_index"]))[0])
                 self._stream_state = "WAITING_HEADER"
+                self.stream_debug_counts["sync_triggers"] += 1  # TEMP diagnostic, see reset_stream()
             else:
                 return None
 
@@ -1196,6 +1413,7 @@ class Ofdm(Block):
                 # False positive or corrupted header -- discard past the
                 # detected start (advance by 1 sample so the same false
                 # peak isn't immediately re-detected) and resume searching.
+                self.stream_debug_counts["header_fail"] += 1  # TEMP diagnostic, see reset_stream()
                 self._stream_buffer = self._stream_buffer[:, self._stream_frame_start + 1 :]
                 self._stream_state = "SEEKING"
                 self._stream_frame_start = None
@@ -1226,8 +1444,16 @@ class Ofdm(Block):
                 p = self._decode_payload_from_header(
                     rx_corrected_full, h["pos"], h["h_hat_data"], h["payload_modem"],
                     h["payload_packetizer"], h["encoded_bit_count"], h["n_payload_symbols"],
+                    h["h_hat_pilots"],
                 )
             except (ValueError, NotImplementedError):
+                self.stream_debug_counts["payload_fail"] += 1  # TEMP diagnostic, see reset_stream()
+                if getattr(self, "debug_payload_symbols", False):
+                    # _decode_payload_from_header() stashes this on self
+                    # BEFORE the exception-raising decode call -- see its
+                    # own comment -- so it's available here even though
+                    # payload_packetizer.decode() just raised.
+                    self.stream_failed_symbol_diagnostics.append(self._last_payload_symbol_diagnostics)
                 self._stream_buffer = self._stream_buffer[:, frame_end:]
                 self._stream_state = "SEEKING"
                 self._stream_frame_start = None
@@ -1246,6 +1472,7 @@ class Ofdm(Block):
                 "bits": p["bits"],
                 "crc_valid": p["crc_valid"],
                 "evm": p["evm"],
+                "symbol_diagnostics": p.get("symbol_diagnostics"),  # TEMP diagnostic, see _decode_payload_from_header()
             }
 
             self._stream_buffer = self._stream_buffer[:, frame_end:]
