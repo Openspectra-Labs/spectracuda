@@ -9,15 +9,14 @@ fft_size/n_pilot/n_data/cp_len/sync/cfo/channel_estimator/equalizer are
 NOT signaled over the air and must already match out-of-band on both ends.
 
 fec/fec1 set to rs_m8/conv_v27 here to match the RX side's own PHY_KWARGS
-(debug/pluto_rx_pingpong_test.py, debug/pluto_rx_standalone_test_v2.py) --
-the RX side runs with strict_fec_check=True and its own PHY_KWARGS comment
-says it "only ever expects rs_m8/conv_v27", so a frame sent with fec=none/
-fec1=none (this script's ORIGINAL setting) gets rejected by that strict
+(debug/pluto_rx_pingpong_test.py, abhi/pluto_rx_standalone_v2.py) -- the RX
+side runs with strict_fec_check=True and its own PHY_KWARGS comment says
+it "only ever expects rs_m8/conv_v27", so a frame sent with fec=none/
+fec1=none (this script's previous setting) gets rejected by that strict
 check even though the header-resolved scheme is otherwise decodable --
 confirmed as the root cause of a ~22-34% "frames just never decoded"
-pattern on a real two-Pi5-Pluto RF link during this project's own 2026-09
-debug session (RSSI/EVM on the frames that DID get through were healthy,
-ruling out a weak-signal explanation).
+pattern on the real two-Pi5-Pluto RF link (RSSI/EVM on the frames that DID
+get through were healthy, ruling out a weak-signal explanation).
 
 Generates ONE fixed 64-byte payload (0x00..0x3F, easy to eyeball-verify on
 decode) ONCE via generate_frame(), then just re-sends that same waveform
@@ -32,19 +31,23 @@ cyclic buffer) match examples/pluto_channel.py's own send_frame() --
 reused, not re-derived.
 
 Usage:
-    python3 debug/pluto_tx_standalone_test.py --uri ip:192.168.3.1 --rate 4e6
+    python3 pluto_tx_standalone_test.py --uri ip:192.168.3.1 --rate 4e6
 """
 import argparse
 import time
 
 import numpy as np
+import adi
 
 from spectracuda.pipeline import Ofdm
-from pluto_common import pluto_tx_init
 
 PHY_KWARGS = dict(
     fft_size=256, n_pilot=8, n_data=216, cp_len=32, modem="qpsk",
     fec="rs_m8", fec1="conv_v27", crc="crc16",
+    # MUST match the RX side's own PHY_KWARGS exactly -- interleaver
+    # choice is not signaled over the air (see abhi/pluto_rx_standalone_v2.py's
+    # PHY_KWARGS comment and framing/packetizer.py's docstring for why).
+    interleaver="block", interleaver_kwargs={"unit_bits": 8},
     sync="schmidl_cox", cfo="schmidl_cox",
     channel_estimator="ls", equalizer="mmse",
     backend="numpy",
@@ -84,7 +87,13 @@ print(f"[tx] frame: {len(scaled)} samples, peak|iq| pre-scale={peak:.4f}, scaled
       f"(int16 full scale=32767)")
 
 # -- configure the real Pluto TX chain --
-sdr = pluto_tx_init(args.uri, args.freq, args.rate, args.tx_gain)
+rf_bw = int(max(args.rate * 1.25, 5e6))
+sdr = adi.Pluto(uri=args.uri)
+sdr.sample_rate = int(args.rate)
+sdr.tx_lo = int(args.freq)
+sdr.tx_rf_bandwidth = rf_bw
+sdr.tx_hardwaregain_chan0 = float(args.tx_gain)
+sdr.tx_cyclic_buffer = False  # one-shot burst per tx() call, not a repeating cyclic buffer
 
 print(f"[tx] uri={args.uri} freq={args.freq/1e9:.4f}GHz rate={args.rate/1e6:.1f}Msps tx_gain={args.tx_gain:+.1f}dB "
       f"interval={args.interval*1000:.0f}ms count={args.count or 'inf'} -- sending fixed 64-byte payload...")

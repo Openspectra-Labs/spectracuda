@@ -10,13 +10,16 @@ Usage:
     python3 debug/pluto_rx_standalone_test.py --uri-rx ip:192.168.3.1 --seconds 10
 """
 import argparse
+import cProfile
+import pstats
 import sys
+import threading
 import time
 
 import numpy as np
 import adi
 
-sys.path.insert(0, "/home/abhi/work/spectracuda")
+sys.path.insert(0, "/home/abhi/spectracuda")
 from spectracuda.pipeline import Ofdm
 
 PHY_KWARGS = dict(
@@ -25,14 +28,10 @@ PHY_KWARGS = dict(
     sync="schmidl_cox", cfo="schmidl_cox",
     channel_estimator="ls", equalizer="mmse",
     backend="numpy",
-    # Root cause of this script's own [SLOW] rx_streaming() stalls (up to
-    # ~1.6s, no TX active at all): a false sync detection decodes noise
-    # into a random-but-registered fec0, which (12 of 17 registered
-    # schemes are LDPC) usually lands on an LDPC variant, and
-    # constructing it (GF(2) matrix inversion) is what actually stalls.
     # strict_fec_check=True rejects any decoded fec0/fec1 that isn't
-    # this receiver's own configured rs_m8/conv_v27 BEFORE constructing
-    # a codec for it -- see Ofdm.__init__'s own comment.
+    # self.fec/self.fec1, BEFORE constructing a payload codec -- fixes the
+    # SEEKING false-positive -> garbage-header -> LDPCCode() construction
+    # stall (see spectracuda/pipeline/ofdm.py, commit 1177c5a).
     strict_fec_check=True,
 )
 RX_SAMPLES = 100_000  # read big (amortize the per-call daemon overhead the
@@ -71,10 +70,14 @@ for _ in range(10):  # PySDR's own recommended flush before real measurement
 rx_call_us = []
 decode_us = []
 n_decoded = 0
+n_crc_valid = 0
+n_crc_checked = 0
 n_over_budget = 0
 
 print(f"[rx-standalone] uri_rx={args.uri_rx} rate={args.rate/1e6:.1f}Msps rx_gain={args.rx_gain:+.1f}dB "
       f"rx_samples={RX_SAMPLES} stream_chunk={STREAM_CHUNK} running for {args.seconds:.1f}s ...")
+print(f"[threads@start] active_count={threading.active_count()} "
+      f"names={[t.name for t in threading.enumerate()]}")
 
 SLOW_ITER_THRESHOLD_US = 2 * BUDGET_US  # flag+diagnose any iteration this far over budget
 
@@ -95,14 +98,24 @@ while time.perf_counter() < t_end:
     n_sub_calls = 0
     worst_sub_us = 0.0
     worst_sub_idx = -1
+    worst_sub_cpu_us = 0.0
+    worst_sub_prof = None
     for start in range(0, len(buf), STREAM_CHUNK):
         piece = buf[start:start + STREAM_CHUNK]
         t_sub0 = time.perf_counter()
-        results.append(ofdm_rx.rx_streaming(piece[None, :]))
+        t_cpu0 = time.process_time()
+        prof = cProfile.Profile()
+        prof.enable()
+        result = ofdm_rx.rx_streaming(piece[None, :])
+        prof.disable()
+        results.append(result)
         sub_us = (time.perf_counter() - t_sub0) * 1e6
+        sub_cpu_us = (time.process_time() - t_cpu0) * 1e6
         if sub_us > worst_sub_us:
             worst_sub_us = sub_us
             worst_sub_idx = n_sub_calls
+            worst_sub_cpu_us = sub_cpu_us
+            worst_sub_prof = prof  # single-call profile -- not diluted by the other ~48 fast sub-calls
         n_sub_calls += 1
     t2 = time.perf_counter()
 
@@ -110,8 +123,12 @@ while time.perf_counter() < t_end:
     if decode_total_us > SLOW_ITER_THRESHOLD_US:
         print(f"  [SLOW] iteration #{n_calls} (0-indexed): decode_total={decode_total_us:.0f}us "
               f"(budget={BUDGET_US:.0f}us) -- worst sub-call #{worst_sub_idx}/{n_sub_calls} "
-              f"took {worst_sub_us:.0f}us"
+              f"wall={worst_sub_us:.0f}us cpu={worst_sub_cpu_us:.0f}us"
               + (" <-- FIRST iteration, looks like a cold-start cost" if n_calls == 0 else ""))
+        print(f"    [threads@SLOW] active_count={threading.active_count()} "
+              f"names={[t.name for t in threading.enumerate()]}")
+        print(f"    [profile of just worst sub-call #{worst_sub_idx}, top 12 by cumulative time]")
+        pstats.Stats(worst_sub_prof).sort_stats("cumulative").print_stats(12)
 
     n_calls += 1
     rx_call_us.append((t_after_rx - t1) * 1e6)
@@ -121,6 +138,11 @@ while time.perf_counter() < t_end:
     for result in results:
         if result is not None:
             n_decoded += 1
+            crc_valid = result.get("crc_valid")
+            if crc_valid is not None:
+                crc_valid_arr = np.asarray(crc_valid).reshape(-1)
+                n_crc_checked += crc_valid_arr.size
+                n_crc_valid += int(crc_valid_arr.sum())
 
 rx_arr = np.array(rx_call_us)
 dec_arr = np.array(decode_us)
@@ -147,4 +169,8 @@ print(f"Iterations over the {BUDGET_US:.0f}us per-read budget: {n_over_budget} "
       f"({100 * n_over_budget / max(n_calls, 1):.2f}%)")
 print(f"Samples actually looked at: {total_samples_seen} of {int(args.seconds*args.rate)} "
       f"({coverage_pct:.2f}% real-time coverage)")
-print(f"Frames completed decode (no TX active, so expected ~0): {n_decoded}")
+print(f"Frames completed decode: {n_decoded}")
+if n_crc_checked:
+    print(f"CRC-valid: {n_crc_valid}/{n_crc_checked} ({100 * n_crc_valid / n_crc_checked:.1f}%)")
+else:
+    print("CRC-valid: n/a (no frames completed decode)")
