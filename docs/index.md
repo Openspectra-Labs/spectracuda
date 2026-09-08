@@ -105,7 +105,7 @@ hardware-validation
 
 ```{toctree}
 :maxdepth: 2
-:caption: The OFDM Field Guide — Part I
+:caption: The OFDM Field Guide — Part I, the PHY chain
 
 book/ch01_ofdm_object
 book/ch02_synchronization
@@ -113,6 +113,18 @@ book/ch03_cfo
 book/ch04_channel_estimation
 book/ch05_modem
 book/ch06_fec_ldpc
+book/ch07_framing
+book/ch08_streaming
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: The OFDM Field Guide — Part II, the MAC layer
+
+book/ch09_mac_modes
+book/ch10_two_radios
+book/ch11_binding_and_quality
+book/ch12_bidirectional_am
 book/roadmap
 ```
 
