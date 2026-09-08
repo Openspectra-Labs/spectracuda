@@ -20,10 +20,10 @@ import threading
 import time
 
 import numpy as np
-import adi
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from spectracuda.pipeline import Ofdm
+from pluto_common import pluto_rx_init
 
 PHY_KWARGS = dict(
     fft_size=256, n_pilot=8, n_data=216, cp_len=32, modem="qpsk",
@@ -47,15 +47,7 @@ ap.add_argument("--rx-gain", type=float, default=60.0)
 ap.add_argument("--seconds", type=float, default=10.0, help="0 = run until Ctrl-C")
 args = ap.parse_args()
 
-rf_bw = int(max(args.rate * 1.25, 5e6))
-
-rx = adi.Pluto(uri=args.uri_rx)
-rx.sample_rate = int(args.rate)
-rx.rx_lo = int(args.freq)
-rx.rx_rf_bandwidth = rf_bw
-rx.gain_control_mode_chan0 = "manual"
-rx.rx_hardwaregain_chan0 = args.rx_gain
-rx.rx_buffer_size = RX_SAMPLES
+rx = pluto_rx_init(args.uri_rx, args.freq, args.rate, args.rx_gain, RX_SAMPLES)
 
 ofdm_rx = Ofdm(**PHY_KWARGS)
 ofdm_rx.reset_stream()

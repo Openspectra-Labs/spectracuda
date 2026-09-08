@@ -27,9 +27,9 @@ import argparse
 import time
 
 import numpy as np
-import adi
 
 from spectracuda.pipeline import Ofdm
+from pluto_common import pluto_tx_init
 
 PHY_KWARGS = dict(
     fft_size=256, n_pilot=8, n_data=216, cp_len=32, modem="qpsk",
@@ -73,13 +73,7 @@ print(f"[tx] frame: {len(scaled)} samples, peak|iq| pre-scale={peak:.4f}, scaled
       f"(int16 full scale=32767)")
 
 # -- configure the real Pluto TX chain --
-rf_bw = int(max(args.rate * 1.25, 5e6))
-sdr = adi.Pluto(uri=args.uri)
-sdr.sample_rate = int(args.rate)
-sdr.tx_lo = int(args.freq)
-sdr.tx_rf_bandwidth = rf_bw
-sdr.tx_hardwaregain_chan0 = float(args.tx_gain)
-sdr.tx_cyclic_buffer = False  # one-shot burst per tx() call, not a repeating cyclic buffer
+sdr = pluto_tx_init(args.uri, args.freq, args.rate, args.tx_gain)
 
 print(f"[tx] uri={args.uri} freq={args.freq/1e9:.4f}GHz rate={args.rate/1e6:.1f}Msps tx_gain={args.tx_gain:+.1f}dB "
       f"interval={args.interval*1000:.0f}ms count={args.count or 'inf'} -- sending fixed 64-byte payload...")
