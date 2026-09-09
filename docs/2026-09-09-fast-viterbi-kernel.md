@@ -97,11 +97,21 @@ every round; round 1's 2.62 ms/frame RX is the best figure of the day.
 timing), so `fast` is now the default on aarch64 as well -- the
 dispatch's `platform.machine()` gate and
 `test_dispatch_prefers_fast_on_measured_architectures` were flipped
-together with this number. Expected effect on the Pi-5's RX (Viterbi
-was 4.55 ms of a ~7.2 ms QAM16/QAM64 frame): ~3.9 ms/frame, i.e. inside
-the 4 Msps budget at QAM16 -- to be confirmed with
-`benchmark_x86_stages_v3.py 32000 qam16` there. `SPECTRACUDA_VITERBI_BACKEND=neon`
-still forces the old kernel for any later comparison.
+together with this number. Predicted effect on the Pi-5's RX (Viterbi
+was 4.55 ms of a ~7.2 ms QAM16/QAM64 frame): ~3.9 ms/frame.
+**Confirmed** with `benchmark_x86_stages_v3.py 32000` on the Pi-5 right
+after the flip:
+
+| Pi-5, 32000-bit SDU | RX ms/frame, start of 2026-09-09 | after modem kernel | **after fast Viterbi** | vs 4 Msps budget | real RX Mbps |
+|---|---|---|---|---|---|
+| QAM16 | 10.1-11.7 | 7.5 | **3.88** (Viterbi line 4.55 -> 0.93) | OK (6.33 ms) | 2.7-3.2 -> **8.25** |
+| QAM64 | 9.3 | 6.9-7.2 | **3.43** (Viterbi line 4.55 -> 0.91) | OK (4.31 ms) | 3.4 -> **9.33** |
+
+The Pi-5 now clears the 4 Msps real-time budget single-core at every
+modulation. Remaining RX ranking there (QAM16): "everything else"
+1.13 ms, Viterbi 0.93, Reed-Solomon 0.69, sync+CFO 0.45, OFDM decode
+0.33, chanest+eq 0.31. `SPECTRACUDA_VITERBI_BACKEND=neon` still forces
+the old kernel for any later comparison.
 
 ## If resuming here
 - The kernel is ~16 ns/bit on x86 with plenty of headroom: the inner
