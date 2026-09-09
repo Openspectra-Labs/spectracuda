@@ -92,9 +92,17 @@ result["evm"], result["rssi_db"], result["cfo_estimate"], result["header"]
 ```
 
 See {doc}`book/ch01_ofdm_object` for the full walkthrough, {doc}`mac` for
-the MAC layer behind the `MacLink` example above, or the
-[README](https://github.com/iottrends/spectracuda#readme) for install
-instructions and every swappable strategy.
+the MAC layer behind the `MacLink` example above, {doc}`installation` to
+actually get this running, or the
+[README](https://github.com/iottrends/spectracuda#readme) for every
+swappable strategy.
+
+```{toctree}
+:maxdepth: 1
+:caption: Getting Started
+
+installation
+```
 
 ```{toctree}
 :maxdepth: 1

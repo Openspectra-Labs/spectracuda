@@ -32,6 +32,15 @@ Install the `cuda` extra (`pip install -e ".[cuda]"`) on a CUDA-capable
 machine (e.g. the Jetson) to exercise `backend="cupy"`. Every block accepts
 `backend="numpy"|"cupy"` explicitly if you want to pin it.
 
+That's everything needed for the PHY chain, the MAC layer, and Viterbi/
+Reed-Solomon's native acceleration (vendored C, compiled on the spot on
+first use, no extra download — silently falls back to pure Python if no
+C compiler is found). LDPC's *optional*, much faster decoder needs a real
+~850MB local build of a separate project (AFF3CT) and is opt-in only —
+see [docs: Installation](https://spectracuda.readthedocs.io/en/latest/installation.html)
+for exactly what that costs and when you'd actually want it; the default
+LDPC path needs none of it.
+
 ## Quick start
 
 One `Ofdm` object owns the whole tx+rx chain — build it once, then call
