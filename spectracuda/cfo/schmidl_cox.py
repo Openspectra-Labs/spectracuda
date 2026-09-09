@@ -22,8 +22,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from ..block import Block
 from ..registry import register
+from ._numba_schmidl_cox import numba_available, numba_correct, numba_estimate
 
 
 @register("cfo", "schmidl_cox")
@@ -55,7 +58,10 @@ class SchmidlCoxCFO(Block):
         L = self.half_len
         n_batch = rx.shape[0]
 
-        cfo = xp.empty((n_batch,), dtype="float64")
+        # Bounds check stays here regardless of which path runs below --
+        # same per-item ValueError either way, so numba_estimate (which
+        # trusts its caller, see its own docstring) never needs to
+        # duplicate this validation.
         for b in range(n_batch):
             d = int(start_index[b])
             if d + 2 * L > rx.shape[-1]:
@@ -63,6 +69,19 @@ class SchmidlCoxCFO(Block):
                     f"start_index {d} + 2*fft_size//2 exceeds available "
                     f"samples ({rx.shape[-1]}) for batch item {b}"
                 )
+
+        # Transparent Numba-JIT acceleration -- see
+        # cfo/_numba_schmidl_cox.py's own module docstring. Same
+        # backend="cupy" exclusion as SchmidlCoxSync.process(): coercing
+        # a cupy array to host numpy here would reintroduce the hidden
+        # device<->host round-trip that regressed the full-pipeline GPU
+        # run once already.
+        if self.backend != "cupy" and numba_available():
+            return numba_estimate(np.asarray(rx), np.asarray(start_index), L)
+
+        cfo = xp.empty((n_batch,), dtype="float64")
+        for b in range(n_batch):
+            d = int(start_index[b])
             first_half = rx[b, d : d + L]
             second_half = rx[b, d + L : d + 2 * L]
             p = xp.sum(xp.conj(first_half) * second_half)
@@ -82,9 +101,22 @@ class SchmidlCoxCFO(Block):
         while real-valued float32 cos/sin hit numpy's faster elementwise
         loops. This runs over the WHOLE received frame's samples on
         every single RX call, so it was a real, measured per-frame cost
-        (~1ms on a ~38k-sample frame), not a micro-optimization."""
+        (~1ms on a ~38k-sample frame), not a micro-optimization.
+
+        Transparent Numba-JIT acceleration on top of that (see
+        cfo/_numba_schmidl_cox.py): replaces the per-sample cos/sin
+        below with a phase-accumulator (NCO) recurrence -- ONE cos/sin
+        evaluation for the whole frame instead of one per sample, then a
+        running complex multiply. A naive fused loop that still called
+        cos/sin per sample was tried first and measured SLOWER than the
+        vectorized path below (see the numba module's docstring for why)
+        -- the recurrence is what actually wins. Same backend="cupy"
+        exclusion as elsewhere in the sync/CFO fusion work -- cupy keeps
+        the xp-vectorized path below."""
         xp = self.xp
         rx = xp.asarray(rx)
+        if self.backend != "cupy" and numba_available():
+            return numba_correct(np.asarray(rx), np.asarray(cfo_estimate, dtype="float64"), self.fft_size)
         cfo_estimate = xp.asarray(cfo_estimate).astype("float32")
         n = xp.arange(rx.shape[-1], dtype="float32")
         angle = (-2 * xp.pi * cfo_estimate[:, None] * n[None, :] / self.fft_size).astype("float32")
