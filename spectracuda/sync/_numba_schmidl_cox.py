@@ -75,7 +75,17 @@ def _get_row_kernel():
     if _row_kernel is None:
         import numba
 
-        @numba.njit(cache=True)
+        # nogil=True: safe here for the same reason the CFO kernels use it
+        # (see docs/2026-09-09-numba-cfo-kernel.md's "If resuming" note) --
+        # this function only reads its own batch row's slice of an
+        # already-allocated numpy array and returns plain scalars, no
+        # Python-object/shared-state touching inside the loop. Without
+        # this, Mac.receive_iq_batch()'s worker threads would still
+        # serialize on this stage despite it being numba-compiled (a
+        # plain @njit still holds the GIL for the call's duration; only
+        # nogil=True releases it, same as the C-code Viterbi/RS path
+        # does via ctypes).
+        @numba.njit(cache=True, nogil=True)
         def _schmidl_cox_row(rx_row: np.ndarray, L: int):
             n_samples = rx_row.shape[0]
             n_candidates = n_samples - 2 * L + 1
