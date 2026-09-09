@@ -109,17 +109,24 @@ def test_pure_noise_never_produces_a_false_complete_result():
 def test_search_buffer_stays_bounded_on_a_long_noise_only_stream():
     """The STREAM_SEARCH_WINDOW_SYMBOLS cap must actually engage -- a long
     silent/noisy stream with no frame in it must not grow the
-    accumulation buffer without bound."""
+    accumulation buffer without bound.
+
+    The bound is STREAM_SEARCH_WINDOW_SYMBOLS symbols of HISTORY plus the
+    most recent chunk -- not a fixed total -- since 2026-09-09: a fixed
+    total silently evicted a not-yet-detected preamble's head whenever
+    one chunk was as long as the cap (see rx_streaming()'s SEEKING
+    comment and tests/test_ofdm_streaming_alignment.py)."""
     ofdm = _make_ofdm()
     rng = np.random.default_rng(4)
     noise = (rng.standard_normal(50000) + 1j * rng.standard_normal(50000)).astype("complex64") * 0.1
+    chunk = 256
 
     ofdm.reset_stream()
-    for i in range(0, len(noise), 256):
-        ofdm.rx_streaming(noise[i : i + 256])
+    for i in range(0, len(noise), chunk):
+        ofdm.rx_streaming(noise[i : i + chunk])
 
-    cap = ofdm.STREAM_SEARCH_WINDOW_SYMBOLS * ofdm.fft_size
-    assert ofdm._stream_buffer.shape[-1] <= cap
+    history = ofdm.STREAM_SEARCH_WINDOW_SYMBOLS * ofdm.fft_size
+    assert ofdm._stream_buffer.shape[-1] <= history + chunk
 
 
 def test_recovers_after_a_false_positive_or_corrupted_frame():

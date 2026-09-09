@@ -1381,17 +1381,49 @@ class Ofdm(Block):
         self._stream_buffer = xp.concatenate([self._stream_buffer, chunk], axis=-1)
 
         if self._stream_state == "SEEKING":
-            cap = self.STREAM_SEARCH_WINDOW_SYMBOLS * self.fft_size
-            if self._stream_buffer.shape[-1] > cap:
-                self._stream_buffer = self._stream_buffer[:, -cap:]
+            # Bound the search buffer to STREAM_SEARCH_WINDOW_SYMBOLS symbols
+            # of HISTORY plus the chunk that just arrived -- not to a fixed
+            # total length. The previous fixed cap (`buffer[-cap:]` applied
+            # after the concat) discarded the ENTIRE previous buffer whenever
+            # one chunk was as long as the cap itself -- and 2048 samples is
+            # exactly what examples/pluto_*_unit.py feed -- so a preamble
+            # that had started in the tail of the previous chunk and not
+            # been detected yet had its head cut off and was never found.
+            # Measured on a clean, zero-noise channel: ~9% of all preamble
+            # alignments silently lost at chunk=2048 (see
+            # tests/test_ofdm_streaming_alignment.py for the sweep).
+            history = self.STREAM_SEARCH_WINDOW_SYMBOLS * self.fft_size
+            max_len = history + chunk.shape[-1]
+            if self._stream_buffer.shape[-1] > max_len:
+                self._stream_buffer = self._stream_buffer[:, -max_len:]
 
             if self._stream_buffer.shape[-1] < self.fft_size:
                 return None  # not even one preamble-length's worth yet
 
             sync_result = self.sync.process(self._stream_buffer)
             metric = float(np.asarray(self._to_host(sync_result["metric"]))[0])
-            if metric >= self.sync_threshold:
-                self._stream_frame_start = int(np.asarray(self._to_host(sync_result["start_index"]))[0])
+            start_index = int(np.asarray(self._to_host(sync_result["start_index"]))[0])
+            # Trailing-edge guard. A preamble that has only PARTIALLY arrived
+            # -- k of its fft_size samples in the buffer, k > L=fft_size/2 --
+            # already scores (2(k-L)/k)^2 on the Schmidl-Cox metric at the very
+            # last candidate offset (buffer_len - fft_size): 0.44 with 3/4 of it
+            # present, 0.73 with 7/8, both well over the default 0.3 threshold,
+            # with a start_index that is (fft_size - k) samples EARLY. Anything
+            # earlier than the CP length means ISI from the preceding symbol
+            # and a failed decode -- measured on a clean channel: up to ~30% of
+            # alignments lost at chunk=64, ~8% at 256, ~2% at 1024. A partial
+            # preamble can never out-score the full one, so the fix is simply
+            # to not accept a detection until L more samples past its end are
+            # already in the buffer -- by then the true start is the argmax.
+            # Costs at most L samples of detection latency, which is
+            # irrelevant (WAITING_HEADER needs the whole header anyway). L is
+            # the exact bound, independent of sync_threshold: with <= L
+            # preamble samples present the two halves don't overlap at all
+            # and the metric is ~0, so no premature detection is ever more
+            # than L samples early.
+            L = self.fft_size // 2
+            if metric >= self.sync_threshold and start_index + self.fft_size + L <= self._stream_buffer.shape[-1]:
+                self._stream_frame_start = start_index
                 self._stream_state = "WAITING_HEADER"
                 self.stream_debug_counts["sync_triggers"] += 1  # TEMP diagnostic, see reset_stream()
             else:
