@@ -42,13 +42,18 @@ import numpy as np
 from ..block import Block
 from ._native import (
     NativeConvolutional,
+    NativeConvolutionalFast,
     NativeConvolutionalNEON,
     NativeConvolutionalSSE,
+    fast_available,
     native_available,
     neon_available,
     sse_available,
 )
 from ._native_hexagon import NativeConvolutionalHexagon, hexagon_available
+
+import os
+import platform
 
 _K = 7
 _G1 = 0o171  # NASA/CCSDS standard rate-1/2 K=7 generator polynomials
@@ -145,21 +150,76 @@ class ConvolutionalCode(Block):
         # (see this file's own comment further down on the two NEON
         # attempts), and only then decide where it actually belongs in
         # this chain.
-        if self.backend == "numpy" and hexagon_available():
-            self._native = NativeConvolutionalHexagon()
-        elif self.backend == "numpy" and sse_available():
-            self._native = NativeConvolutionalSSE()
-        elif self.backend == "numpy" and neon_available():
-            self._native = NativeConvolutionalNEON()
-        elif self.backend == "numpy" and native_available():
-            self._native = NativeConvolutional()
-        else:
-            self._native = None
+        #
+        # "fast" kernel (2026-09-09, src/convolutional/fast/ -- see
+        # include/correct-fast.h): a different decoder formulation
+        # (precomputed branch-metric vectors, 8-bit path metrics, no
+        # data-dependent gather), one source compiled to SSE2 on x86_64
+        # and NEON on AArch64. Bit-exact with the portable decoder on
+        # 5790/5790 pure-random inputs and every real-codeword test
+        # (tests/test_fec_fast_viterbi.py) -- including reproducing an
+        # upstream quirk found along the way: libcorrect's error-buffer
+        # swap discards warmup step 0, so the first received symbol pair
+        # never contributes. Measured on the x86 dev box: 16 ns/bit vs
+        # SSE4.1's 48 (0.50 vs 1.50 ms for a 32032-bit PDU, 3x), so it is
+        # preferred over SSE there. On AArch64 it has NOT yet been
+        # measured against the NEON kernel on real hardware, so NEON
+        # stays the default there until it is (same rule as every
+        # promotion above); SPECTRACUDA_VITERBI_BACKEND=fast opts in for
+        # exactly that A/B (examples/benchmark_viterbi_backends.py
+        # drives every compiled backend directly, dispatch aside).
+        self._native = self._select_native_backend() if self.backend == "numpy" else None
 
         # Forward transition table (plain numpy -- tiny, built once,
         # independent of backend): for each of the 64 states and each
         # input bit (0/1), the resulting next_state and the two output
         # bits.
+        self._build_transition_tables(xp)
+
+    @staticmethod
+    def _select_native_backend():
+        """The measured-preference chain above, plus an explicit override:
+        SPECTRACUDA_VITERBI_BACKEND = hexagon | fast | sse | neon |
+        portable | python forces that backend (raising if it isn't
+        available here -- an override that silently fell back would make
+        an A/B measurement lie), "python" meaning the pure-array path
+        with no native backend at all."""
+        forced = os.environ.get("SPECTRACUDA_VITERBI_BACKEND", "").strip().lower()
+        if forced:
+            if forced == "python":
+                return None
+            table = {
+                "hexagon": (hexagon_available, NativeConvolutionalHexagon),
+                "fast": (fast_available, NativeConvolutionalFast),
+                "sse": (sse_available, NativeConvolutionalSSE),
+                "neon": (neon_available, NativeConvolutionalNEON),
+                "portable": (native_available, NativeConvolutional),
+            }
+            if forced not in table:
+                raise ValueError(
+                    f"SPECTRACUDA_VITERBI_BACKEND={forced!r}: expected one of "
+                    f"{sorted(table)} or 'python'"
+                )
+            available, cls = table[forced]
+            if not available():
+                raise RuntimeError(
+                    f"SPECTRACUDA_VITERBI_BACKEND={forced!r} requested, but that backend "
+                    f"is not available on this machine"
+                )
+            return cls()
+        if hexagon_available():
+            return NativeConvolutionalHexagon()
+        if fast_available() and platform.machine() in ("x86_64", "AMD64"):
+            return NativeConvolutionalFast()
+        if sse_available():
+            return NativeConvolutionalSSE()
+        if neon_available():
+            return NativeConvolutionalNEON()
+        if native_available():
+            return NativeConvolutional()
+        return None
+
+    def _build_transition_tables(self, xp) -> None:
         next_state = np.empty((_N_STATES, 2), dtype=np.int64)
         out1 = np.empty((_N_STATES, 2), dtype=np.uint8)
         out2 = np.empty((_N_STATES, 2), dtype=np.uint8)

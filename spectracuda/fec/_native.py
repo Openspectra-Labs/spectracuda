@@ -119,6 +119,18 @@ _NEON_C_FILES = _CONV_C_FILES + [
     os.path.join(_NEON_SRC_DIR, f) for f in ("convolutional.c", "encode.c", "decode.c")
 ]
 
+# "Fast" Viterbi decode -- a different decoder formulation (precomputed
+# branch-metric vectors, 8-bit path metrics, no data-dependent gather),
+# not another port of the portable inner loop. One source, three
+# backends chosen at compile time: SSE2 on x86_64, NEON on AArch64, a
+# generic vector-extension fallback elsewhere -- so the same file that
+# is bit-exact-tested against the portable decoder on the x86 dev box is
+# what runs on the Pi 5. See include/correct-fast.h for the design.
+_FAST_SRC_DIR = os.path.join(_SRC_DIR, "src", "convolutional", "fast")
+_FAST_C_FILES = _CONV_C_FILES + [
+    os.path.join(_FAST_SRC_DIR, f) for f in ("convolutional.c", "encode.c", "decode.c")
+]
+
 _G1 = 0o171  # spectracuda's own conv_v27 polynomials (viterbi.py) -- verified interop
 _G2 = 0o133
 _TAIL_BITS = 6  # K-1, K=7
@@ -463,6 +475,86 @@ def neon_available() -> bool:
     return _neon_lib is not None
 
 
+_fast_lock = threading.Lock()
+_fast_checked = False
+_fast_lib: Optional[ctypes.CDLL] = None
+
+
+def _fast_source_hash() -> str:
+    h = hashlib.sha256()
+    for path in sorted(_FAST_C_FILES) + [
+        os.path.join(_INCLUDE_DIR, "correct.h"),
+        os.path.join(_INCLUDE_DIR, "correct-fast.h"),
+        os.path.join(_INCLUDE_DIR, "correct", "convolutional", "fast", "convolutional.h"),
+    ]:
+        with open(path, "rb") as f:
+            h.update(f.read())
+    h.update(sys.platform.encode())
+    # The .so is built for whichever SIMD backend the compiler selects for
+    # THIS machine (SSE2 / NEON / generic), so the cache key must include
+    # the architecture -- same reasoning as _sse_source_hash().
+    h.update(platform.machine().encode())
+    return h.hexdigest()[:16]
+
+
+def _compile_fast(so_path: str) -> None:
+    cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if cc is None:
+        raise RuntimeError("no C compiler (cc/gcc/clang) found")
+    # No -m flags: SSE2 is part of the x86_64 baseline and NEON of the
+    # AArch64 baseline, so the kernel's own #if selection needs nothing
+    # beyond the default target -- and therefore no runtime CPU-feature
+    # check either (unlike SSE4.1's _cpu_supports_sse41()).
+    cmd = [cc, "-O2", "-fPIC", "-std=c99", "-I", _INCLUDE_DIR, "-shared", "-o", so_path] + _FAST_C_FILES + ["-lm"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"native fast FEC backend compile failed: {result.stderr[-2000:]}")
+
+
+def _bind_fast_signatures(lib: ctypes.CDLL) -> None:
+    lib.correct_convolutional_fast_create.restype = ctypes.c_void_p
+    lib.correct_convolutional_fast_create.argtypes = [ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint16)]
+    lib.correct_convolutional_fast_destroy.argtypes = [ctypes.c_void_p]
+    lib.correct_convolutional_fast_encode_len.restype = ctypes.c_size_t
+    lib.correct_convolutional_fast_encode_len.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.correct_convolutional_fast_encode.restype = ctypes.c_size_t
+    lib.correct_convolutional_fast_encode.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8)
+    ]
+    lib.correct_convolutional_fast_decode.restype = ctypes.c_ssize_t
+    lib.correct_convolutional_fast_decode.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8)
+    ]
+
+
+def fast_available() -> bool:
+    """True if the "fast" Viterbi decode path (src/convolutional/fast/)
+    is compiled and loaded. Checked once per process, cached. No
+    platform or CPU-feature gate: the kernel selects its SIMD backend at
+    compile time from the compiler's own baseline target, so "it
+    compiled" is the whole condition. Same silent-and-permanent fallback
+    contract as neon_available() for every failure mode."""
+    global _fast_checked, _fast_lib
+    if _fast_checked:
+        return _fast_lib is not None
+    with _fast_lock:
+        if _fast_checked:
+            return _fast_lib is not None
+        _fast_checked = True
+        try:
+            so_path = os.path.join(_cache_dir(), f"libcorrect_fast_{_fast_source_hash()}.so")
+            if not os.path.exists(so_path):
+                tmp_path = so_path + f".tmp{os.getpid()}"
+                _compile_fast(tmp_path)
+                os.replace(tmp_path, so_path)  # atomic -- same race-avoidance as native_available()
+            lib = ctypes.CDLL(so_path)
+            _bind_fast_signatures(lib)
+            _fast_lib = lib
+        except Exception:
+            _fast_lib = None
+    return _fast_lib is not None
+
+
 class NativeConvolutional:
     """Drop-in accelerated backend for ConvolutionalCode's encode()/
     decode() -- exact same batch-shape contract. Persistent
@@ -648,6 +740,59 @@ class NativeConvolutionalNEON:
         encoded_bytes = np.packbits(padded_bits)
         msg_out = (ctypes.c_uint8 * (Tp // 8 + 8))()
         n_written = _neon_lib.correct_convolutional_neon_decode(self._conv, encoded_bytes.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), 2 * Tp, msg_out)
+        decoded = np.unpackbits(np.frombuffer(bytes(msg_out[: max(n_written, 0)]), dtype="uint8"))
+        return decoded[:k]
+
+    def encode(self, bits: np.ndarray) -> np.ndarray:
+        bits = np.asarray(bits, dtype="uint8")
+        return np.stack([self._encode_one(bits[b]) for b in range(bits.shape[0])])
+
+    def decode(self, bits: np.ndarray) -> np.ndarray:
+        bits = np.asarray(bits, dtype="uint8")
+        return np.stack([self._decode_one(bits[b]) for b in range(bits.shape[0])])
+
+
+class NativeConvolutionalFast:
+    """Drop-in for ConvolutionalCode's encode()/decode() backed by the
+    "fast" decoder (see fast_available() and include/correct-fast.h).
+    Same batch-shape contract and the same _DECODE_PAD_PAIRS decode-side
+    workaround as the other native classes: the withheld-trailing-bits
+    quirk is reproduced deliberately (the fast decoder mirrors the
+    portable one's bit_writer usage exactly, so that it is bit-exact
+    with it, quirk included -- see tests/test_fec_fast_viterbi.py).
+
+    encode() is the identical portable encoder (fast/encode.c), same as
+    the SSE/NEON classes."""
+
+    def __init__(self) -> None:
+        if not fast_available():
+            raise RuntimeError("native fast FEC backend is not available")
+        poly = (ctypes.c_uint16 * 2)(_G1, _G2)
+        self._conv = _fast_lib.correct_convolutional_fast_create(2, 7, poly)
+        if not self._conv:
+            raise RuntimeError("correct_convolutional_fast_create failed")
+
+    def _encode_one(self, msg_bits: np.ndarray) -> np.ndarray:
+        k = len(msg_bits)
+        padded = np.concatenate([msg_bits, np.zeros(_TAIL_BITS, dtype="uint8")])
+        msg_bytes = np.packbits(padded)
+        enc_len_bits = _fast_lib.correct_convolutional_fast_encode_len(self._conv, len(msg_bytes))
+        encoded = (ctypes.c_uint8 * (enc_len_bits // 8 + 8))()
+        _fast_lib.correct_convolutional_fast_encode(self._conv, msg_bytes.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), len(msg_bytes), encoded)
+        want_bits = 2 * (k + _TAIL_BITS)
+        encoded_bytes = np.frombuffer(bytes(encoded[: want_bits // 8 + 1]), dtype="uint8")
+        return np.unpackbits(encoded_bytes)[:want_bits]
+
+    def _decode_one(self, encoded_bits: np.ndarray) -> np.ndarray:
+        # See NativeConvolutional._decode_one's own docstring for the
+        # full withheld-bits story -- identical fix, identical margin.
+        T = len(encoded_bits) // 2
+        k = T - _TAIL_BITS
+        padded_bits = np.concatenate([encoded_bits, np.zeros(2 * _DECODE_PAD_PAIRS, dtype="uint8")])
+        Tp = T + _DECODE_PAD_PAIRS
+        encoded_bytes = np.packbits(padded_bits)
+        msg_out = (ctypes.c_uint8 * (Tp // 8 + 8))()
+        n_written = _fast_lib.correct_convolutional_fast_decode(self._conv, encoded_bytes.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), 2 * Tp, msg_out)
         decoded = np.unpackbits(np.frombuffer(bytes(msg_out[: max(n_written, 0)]), dtype="uint8"))
         return decoded[:k]
 
