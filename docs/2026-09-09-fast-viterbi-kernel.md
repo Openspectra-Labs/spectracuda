@@ -126,8 +126,13 @@ the padding laid out by a single vectorized numpy op. Byte-identical to
 the per-block path (`tests/test_fec_reed_solomon_batch.py`: clean,
 <=16 corrected errors, shortened blocks down to k=1, non-contiguous
 views, uncorrectable block still raises). x86, 36 blocks: decode
-0.92 -> 0.40 ms, encode 0.66 -> 0.52 ms. Not yet re-measured on the
-Pi-5 (expect the 1.32 ms RX line at 64k to roughly halve).
+0.92 -> 0.40 ms, encode 0.66 -> 0.52 ms. **Pi-5, 64000-bit QAM64 frame,
+after pulling:** RS decode 1.32 -> 0.49 ms, RS encode 0.96 -> 0.51 ms;
+RX 6.13 -> 5.33 ms/frame = **12.0 Mbps real RX throughput** single-core
+(airtime 8.42 ms at 4 Msps). For the first time the benchmark reports
+TX (5.36 ms) as the bottleneck: Viterbi ENCODE is 2.13 ms there (~33
+ns/bit for a shift-register convolution that should be ~1 ns/bit) and
+TX "everything else" 2.68 ms -- the next two items if TX ever matters.
 
 ## If resuming here
 - The kernel is ~16 ns/bit on x86 with plenty of headroom: the inner
