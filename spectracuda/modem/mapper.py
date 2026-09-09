@@ -20,9 +20,12 @@ decision, nearest constellation point) is the exact inverse.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Tuple
+
+import numpy as np
 
 from ..block import Block
+from ._numba_mapper import numba_available, numba_hard_decision
 
 _BITS_PER_SYMBOL = {
     "bpsk": 1,
@@ -146,10 +149,57 @@ class Modem(Block):
         q_level = self._pam_level(q_bin, half)
         return ((i_level + 1j * q_level) * norm).astype("complex64")
 
+    def _numba_path_applies(self, symbols: Any) -> bool:
+        """Transparent Numba-JIT hard decision (see modem/_numba_mapper.py's
+        own docstring). Only for backend="numpy" AND complex64 input: the
+        kernel's float32 arithmetic is what makes its bits bit-exact with
+        the numpy path below, so a complex128 input (rare; nothing in the
+        pipeline produces one) keeps the numpy path rather than risking a
+        rounding-boundary mismatch. cupy inputs are NOT coerced to host
+        here -- same reasoning as sync/schmidl_cox.py: that would
+        reintroduce a hidden device<->host round-trip."""
+        return (
+            self.backend != "cupy"
+            and numba_available()
+            and isinstance(symbols, np.ndarray)
+            and symbols.dtype == np.complex64
+            and symbols.ndim == 2
+        )
+
     def demodulate(self, symbols: Any) -> Any:
         """Hard-decision demodulation (nearest constellation point)."""
+        symbols = self.xp.asarray(symbols)
+        if self._numba_path_applies(symbols):
+            bits, _, _ = numba_hard_decision(symbols, self.scheme, self.bits_per_symbol, self._norm)
+            return bits
+        return self._demodulate_numpy(symbols)
+
+    def demodulate_stats(self, symbols: Any) -> Tuple[Any, Any, Any]:
+        """demodulate() plus the two per-row power sums EVM is built from:
+        (bits, sum |symbol - nearest_point|^2, sum |nearest_point|^2), each
+        sum over the last axis, so that
+        sqrt(err_sum / ref_sum) == compute_evm(symbols, modulate(bits))
+        -- what rx_process() computes for its `evm` readout -- WITHOUT the
+        demodulate -> modulate round trip: the nearest point is already
+        known inside the hard decision. One fused pass on the numba path;
+        the numpy fallback below does the literal round trip so both
+        paths return the same thing (verified in
+        tests/test_modem_numba_acceleration.py)."""
         xp = self.xp
         symbols = xp.asarray(symbols)
+        if self._numba_path_applies(symbols):
+            return numba_hard_decision(symbols, self.scheme, self.bits_per_symbol, self._norm)
+        bits = self._demodulate_numpy(symbols)
+        ideal = self.modulate(bits)
+        err = xp.sum(xp.abs(symbols - ideal) ** 2, axis=-1)
+        ref = xp.sum(xp.abs(ideal) ** 2, axis=-1)
+        return bits, err, ref
+
+    def _demodulate_numpy(self, symbols: Any) -> Any:
+        """The original xp-vectorized hard decision -- the reference the
+        numba kernel is verified bit-exact against, and the path every
+        cupy-backend instance still takes."""
+        xp = self.xp
         norm = self._norm
         descaled = symbols / norm
 

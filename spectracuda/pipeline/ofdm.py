@@ -1205,7 +1205,16 @@ class Ofdm(Block):
             cpe_to_apply = xp.zeros_like(cpe_to_apply)
         equalized_combined = equalized_combined * xp.exp(-1j * cpe_to_apply)[:, None]
 
-        demod_bits_combined = payload_modem.demodulate(equalized_combined)  # (n_batch*n_payload_symbols, bits_per_symbol_payload) -- UNTRUNCATED, POST-CPE-correction
+        # Hard decision fused with the EVM power sums (see
+        # modem/_numba_mapper.py): the nearest constellation point is
+        # already known inside the hard decision, so the EVM below no
+        # longer needs a demodulate -> modulate round trip over all
+        # payload symbols just to get it back. err/ref are per-row sums
+        # over that row's data subcarriers; a batch item's EVM is the
+        # ratio of its rows' totals (sums are additive, so this equals
+        # compute_evm() over the flattened (n_batch, n_payload_symbols*n_data)
+        # layout the old code used -- same definition, one pass).
+        demod_bits_combined, evm_err_rows, evm_ref_rows = payload_modem.demodulate_stats(equalized_combined)  # bits: (n_batch*n_payload_symbols, bits_per_symbol_payload) -- UNTRUNCATED, POST-CPE-correction
 
         # TEMP diagnostic (same root-causing effort as the CPE correction
         # above -- see docs/2026-09-06-rx-packet-loss-and-ism-band-
@@ -1253,9 +1262,7 @@ class Ofdm(Block):
         # per-symbol data for a frame that FAILED, not just ones that succeeded.
         self._last_payload_symbol_diagnostics = symbol_diagnostics
 
-        n_data = equalized_combined.shape[-1]
         bits_per_symbol_payload = demod_bits_combined.shape[-1]
-        equalized_flat = equalized_combined.reshape(n_batch, n_payload_symbols * n_data)
         encoded_bits = demod_bits_combined.reshape(n_batch, n_payload_symbols * bits_per_symbol_payload)
 
         # Discard any automatic partial-last-symbol padding (see
@@ -1280,11 +1287,16 @@ class Ofdm(Block):
         crc_valid = decode_result["crc_valid"]
 
         # EVM: standard normalized RMS EVM against the receiver's OWN
-        # hard-decision re-modulated symbols (no ground truth needed --
-        # see framing/stats.py's module docstring).
-        ideal_combined = payload_modem.modulate(demod_bits_combined)
-        ideal_flat = ideal_combined.reshape(n_batch, n_payload_symbols * n_data)
-        evm = compute_evm(xp, equalized_flat, ideal_flat)
+        # hard-decision nearest points (no ground truth needed -- see
+        # framing/stats.py's module docstring), from the per-row power
+        # sums the fused hard decision above already produced. Same
+        # definition as compute_evm() over the UNTRUNCATED symbols (the
+        # last symbol's filler bits are still real EVM data, just not
+        # real FEC codeword bits). float32 to match compute_evm()'s
+        # output dtype for complex64 input.
+        evm_err = evm_err_rows.reshape(n_batch, n_payload_symbols).sum(axis=-1)
+        evm_ref = evm_ref_rows.reshape(n_batch, n_payload_symbols).sum(axis=-1)
+        evm = xp.sqrt(evm_err / evm_ref).astype("float32")
 
         return {"bits": raw_bits, "crc_valid": crc_valid, "evm": evm, "symbol_diagnostics": symbol_diagnostics}
 

@@ -103,12 +103,12 @@ decode of the frame itself vs 3.77 ms of airtime (1.18x -- this x86 box
 does not quite keep up single-core at 10 Msps, and that is the decode,
 not streaming). 64-sample chunks are still 2x airtime: don't.
 
-## 3. NOT DONE: where the decode's "everything else" bucket goes
+## 3. DONE: fused hard-decision + EVM kernel (the "everything else" bucket's biggest slice)
 
-`benchmark_x86_stages_v3.py`'s unbucketed remainder is now the largest
-RX line item on x86 (~1.2-1.5 ms/frame, ~40%) and #2 on the Pi-5. A
+`benchmark_x86_stages_v3.py`'s unbucketed remainder was the largest RX
+line item on x86 (~1.2-1.5 ms/frame, ~40%) and #2 on the Pi-5. A
 cProfile map over 40 `receive_iq()` frames (cProfile inflates ~1.3-1.5x,
-the ranking is what matters) puts the fat at:
+the ranking is what matters) put the fat at:
 - `Modem.demodulate` ~0.68 ms/frame (the generic M-QAM path:
   descale, round/clip per axis, gray, bit unpack, concat -- ~20 array
   passes and 22 `astype` copies per frame for what is a sign test at
@@ -122,9 +122,58 @@ the ranking is what matters) puts the fat at:
 - `_decode_payload_from_header` self time ~0.3 ms (slot gather + CPE
   math), `compute_rssi_db` ~0.1 ms.
 
-Proposed next step: one fused, `nogil` numba hard-decision kernel
-returning bits AND the nearest-point symbols (and the EVM power sums) in
-a single pass, replacing demodulate + modulate + compute_evm on the
-payload path. Same two-gate discipline as every kernel before it:
-bit-exact against the existing `Modem` on all five schemes first
-(`tests/test_modem.py`), benchmark second.
+### What shipped
+`spectracuda/modem/_numba_mapper.py`: one fused, `nogil` numba kernel
+doing the hard decision (descale -> per-axis level index -> gray ->
+bits) AND accumulating the EVM error/reference power sums per row in
+the same pass. Wired in as `Modem.demodulate()` (transparent dispatch,
+bits only) and a new `Modem.demodulate_stats()` (bits + the two sums);
+`_decode_payload_from_header()` now calls the latter and derives EVM
+from the sums, dropping the `modulate(demod_bits)` round trip and the
+separate `compute_evm` sweep. Same `backend != "cupy"` gating as the
+sync/CFO kernels, plus one more: complex64 input only (see below).
+
+**Bit-exactness was the whole design constraint** -- these bits are the
+FEC's input. The kernel reproduces numpy's float32 arithmetic step for
+step, including a non-obvious one: numpy's `symbols / norm`
+(complex64 / python float) is not a division -- numpy's complex-division
+loop computes the float32 reciprocal once and multiplies each component
+by it. Round-half-to-even via `np.rint`, clip, then int. A complex128
+input keeps the numpy path rather than risk a rounding-boundary
+mismatch. Only the EVM sums accumulate in float64 (EVM agrees with the
+old `compute_evm` to ~1e-6 relative; it is a diagnostic).
+
+### Verification (`tests/test_modem_numba_acceleration.py`, 8 tests)
+Bit-for-bit equality with the numpy path for all five schemes at 30 /
+10 / 0 / -5 dB SNR (low SNR is what exercises the round/clip
+boundaries), and on symbols placed exactly on / one float32 ulp either
+side of every per-axis decision threshold (qam16/64/256); EVM sums
+match `compute_evm(symbols, modulate(demodulate(symbols)))` to
+rtol=1e-5; the dispatch actually reaches the kernel for numpy/complex64
+and never for complex128 or `backend="cupy"`; and end-to-end
+`rx_process()` on a real noisy bound QAM16 frame returns identical
+payload bits and equal EVM with the kernel on vs forced off. Full
+suite: 945 passed, 34 skipped, the same 4 pre-existing CPE-commit
+failures, nothing new.
+
+### Measured (x86, pinned core, one frame's 128x216 payload symbols, median of 200)
+| scheme | old demodulate+modulate+compute_evm | fused `demodulate_stats` | | `demodulate` alone, old -> new |
+|---|---|---|---|---|
+| qpsk | 0.987 ms | 0.166 ms | **5.9x** | 0.426 -> 0.170 ms (2.5x) |
+| qam16 | 2.634 ms | 0.178 ms | **14.8x** | 0.784 -> 0.174 ms (4.5x) |
+| qam64 | 2.344 ms | 0.191 ms | **12.3x** | 0.862 -> 0.191 ms (4.5x) |
+
+End-to-end (`benchmark_x86_stages_v3.py 32000`, same machine, same
+session): RX **~3.2-3.3 -> ~2.71 ms/frame** at QPSK, the "everything
+else" bucket ~1.2-1.5 -> ~0.8 ms; QAM64 RX 3.56 -> 3.24 ms/frame. (WSL2
+absolute numbers drift run to run; the isolated A/B above is the
+trustworthy figure, the end-to-end one is corroboration.)
+
+### If resuming here
+- The kernel is ~6 ns/symbol -- not tapped out (the per-bit inner loop
+  and `int(np.rint())` are the obvious places), but it is no longer the
+  bottleneck: what's left in "everything else" is the slot gather + CPE
+  math in `_decode_payload_from_header` (~0.3 ms) and the header path.
+- Next largest RX items on x86 are now Viterbi (~0.78 ms) and OFDM
+  decode (~0.45 ms -- 128 x 256-pt FFTs should be ~50 us in pocketfft,
+  so the CP-strip gather/reshape copies are the suspect there).
