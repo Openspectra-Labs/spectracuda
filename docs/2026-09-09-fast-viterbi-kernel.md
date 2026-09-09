@@ -134,6 +134,24 @@ TX (5.36 ms) as the bottleneck: Viterbi ENCODE is 2.13 ms there (~33
 ns/bit for a shift-register convolution that should be ~1 ns/bit) and
 TX "everything else" 2.68 ms -- the next two items if TX ever matters.
 
+## Follow-up the same day: Numba convolutional ENCODER (`fec/_numba_conv_encode.py`)
+
+Once RX was under the airtime budget the benchmark flipped to
+"bottleneck: TX", with Viterbi ENCODE the largest TX item (2.13 ms for a
+64032-bit PDU on the Pi-5, 1.45 ms on x86 -- ~22-33 ns/bit for a 7-tap
+XOR shift register). libcorrect's encoder is a per-bit loop through
+bit_reader/bit_writer function calls, wrapped in a packbits/unpackbits/
+concatenate round trip per row. The new kernel is one `nogil` Numba pass
+over the UNPACKED bit arrays ConvolutionalCode.encode() already uses:
+per input bit, one 128-entry table lookup (7-bit register -> both
+output bits) and two byte stores, tail handled in-loop. Bit-exact with
+libcorrect's encoder AND the pure-array path at 17 lengths (1 bit ..
+64032 bits; `tests/test_fec_conv_encode_numba.py`); preferred whenever
+numba is importable, `SPECTRACUDA_VITERBI_BACKEND=python` still forces
+the pure path. x86, 64032 bits: **1.30 -> 0.147 ms (1.9 ns/bit, ~9x)**;
+the v3 TX Viterbi line 0.5-0.7 -> 0.13-0.16 ms. Pi-5 re-measure pending
+(expect 2.13 -> ~0.25 ms, taking ~1.9 ms off the 5.4 ms TX frame).
+
 ## If resuming here
 - The kernel is ~16 ns/bit on x86 with plenty of headroom: the inner
   step is ~40 vector ops and the decision slices are written

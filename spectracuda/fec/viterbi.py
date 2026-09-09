@@ -51,6 +51,7 @@ from ._native import (
     sse_available,
 )
 from ._native_hexagon import NativeConvolutionalHexagon, hexagon_available
+from ._numba_conv_encode import build_output_table, numba_available as _encode_numba_available, numba_encode
 
 import os
 import platform
@@ -168,7 +169,20 @@ class ConvolutionalCode(Block):
         # portable|python forces any backend for a later A/B
         # (examples/benchmark_viterbi_backends.py drives every compiled
         # backend directly, dispatch aside).
-        self._native = self._select_native_backend() if self.backend == "numpy" else None
+        self._forced_backend = os.environ.get("SPECTRACUDA_VITERBI_BACKEND", "").strip().lower()
+        self._native = self._select_native_backend(self._forced_backend) if self.backend == "numpy" else None
+
+        # TX side: a one-pass Numba encoder over the unpacked bit arrays
+        # (fec/_numba_conv_encode.py) replaces the native encoder's
+        # per-bit bit_reader/bit_writer loop plus its packbits/unpackbits
+        # round trip -- 2.13 ms for a 64032-bit PDU on the Pi-5 was the
+        # largest TX line item (2026-09-09). Preferred over the native
+        # encoder whenever numba is importable; the "python" override
+        # still forces the pure-array path for A/B.
+        self._encode_table = build_output_table(_G1, _G2)
+        self._use_numba_encode = (
+            self.backend == "numpy" and self._forced_backend != "python" and _encode_numba_available()
+        )
 
         # Forward transition table (plain numpy -- tiny, built once,
         # independent of backend): for each of the 64 states and each
@@ -177,14 +191,13 @@ class ConvolutionalCode(Block):
         self._build_transition_tables(xp)
 
     @staticmethod
-    def _select_native_backend():
+    def _select_native_backend(forced: str = ""):
         """The measured-preference chain above, plus an explicit override:
         SPECTRACUDA_VITERBI_BACKEND = hexagon | fast | sse | neon |
         portable | python forces that backend (raising if it isn't
         available here -- an override that silently fell back would make
         an A/B measurement lie), "python" meaning the pure-array path
         with no native backend at all."""
-        forced = os.environ.get("SPECTRACUDA_VITERBI_BACKEND", "").strip().lower()
         if forced:
             if forced == "python":
                 return None
@@ -264,6 +277,8 @@ class ConvolutionalCode(Block):
         bits = xp.asarray(bits)
         if bits.ndim == 1:
             bits = bits[None, :]
+        if self._use_numba_encode and isinstance(bits, np.ndarray):
+            return numba_encode(bits, self._encode_table, self.tail_bits)
         if self._native is not None:
             return xp.asarray(self._native.encode(bits))
         n_batch = bits.shape[0]
