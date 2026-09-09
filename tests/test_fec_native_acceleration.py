@@ -109,13 +109,17 @@ def test_convolutional_code_correctness_regardless_of_backend_state():
 # ConvolutionalCode.__init__).
 
 @pytest.mark.skipif(not _NEON_OK, reason="not an aarch64/arm64 machine, or NEON compile failed -- inactive here")
-def test_convolutional_code_neon_backend_is_active():
+def test_convolutional_code_neon_backend_is_active(monkeypatch):
     """On a real ARM machine (a Raspberry Pi 5, a Jetson's ARM cores),
-    this must actually be what gets selected -- not silently falling
-    back to the portable path (which would mean neon_available() lied,
-    or ConvolutionalCode's dispatch order in viterbi.py is wrong)."""
+    the NEON kernel must remain loadable and selectable -- not silently
+    replaced by the portable path (which would mean neon_available()
+    lied). Since 2026-09-09 it is no longer the DEFAULT there (the
+    "fast" kernel measured 5.1x faster on the Pi-5 and is preferred --
+    see tests/test_fec_fast_viterbi.py), so this checks it via the
+    explicit override rather than the default dispatch."""
     from spectracuda.fec._native import NativeConvolutionalNEON
 
+    monkeypatch.setenv("SPECTRACUDA_VITERBI_BACKEND", "neon")
     c = ConvolutionalCode(backend="numpy")
     assert isinstance(c._native, NativeConvolutionalNEON)
 

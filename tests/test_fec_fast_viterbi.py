@@ -124,24 +124,19 @@ def test_batch_shape_contract(codecs):
 
 # -- dispatch (fec/viterbi.py) ------------------------------------------------
 
-@pytest.mark.skipif(platform.machine() not in ("x86_64", "AMD64"), reason="fast is only the measured default on x86_64 so far")
-def test_dispatch_prefers_fast_on_x86_64(monkeypatch):
+@pytest.mark.skipif(
+    platform.machine() not in ("x86_64", "AMD64", "aarch64", "arm64"),
+    reason="fast is the measured default only on x86_64 (3x vs SSE4.1) and aarch64 (5.1x vs NEON on the Pi-5)",
+)
+def test_dispatch_prefers_fast_on_measured_architectures(monkeypatch):
+    """Measured before being made the default on each: x86 dev box 16 vs
+    48 ns/bit; Pi-5 24 vs 122 ns/bit (2026-09-09, see
+    docs/2026-09-09-fast-viterbi-kernel.md). Any other architecture gets
+    the unmeasured generic build only via the env override."""
     monkeypatch.delenv("SPECTRACUDA_VITERBI_BACKEND", raising=False)
     from spectracuda.fec.viterbi import ConvolutionalCode
 
     assert isinstance(ConvolutionalCode(backend="numpy")._native, _native.NativeConvolutionalFast)
-
-
-@pytest.mark.skipif(platform.machine() not in ("aarch64", "arm64"), reason="aarch64-only expectation")
-def test_dispatch_keeps_neon_default_on_aarch64_until_measured(monkeypatch):
-    """The fast kernel has not been A/B'd against NEON on real ARM hardware
-    yet, so it must NOT be the default there -- opt-in only. Flip this
-    test (and the dispatch) together, with the measured number."""
-    monkeypatch.delenv("SPECTRACUDA_VITERBI_BACKEND", raising=False)
-    from spectracuda.fec.viterbi import ConvolutionalCode
-
-    if _native.neon_available():
-        assert isinstance(ConvolutionalCode(backend="numpy")._native, _native.NativeConvolutionalNEON)
 
 
 def test_dispatch_env_override(monkeypatch):

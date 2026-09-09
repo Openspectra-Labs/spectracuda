@@ -84,20 +84,24 @@ the "FEC decode -- Viterbi" line went 1.51-1.89 ms (SSE4.1) -> 0.48-0.78 ms
 for that run (all absolutes ~2x the morning's), but the pairing held in
 every round; round 1's 2.62 ms/frame RX is the best figure of the day.
 
-3x over the SSE4.1 kernel on x86. **Not yet measured on the Pi-5**: the
-dispatch keeps NEON as the ARM default until it is. To measure there
-(after `git pull`):
+3x over the SSE4.1 kernel on x86.
 
-```
-.venv/bin/python examples/benchmark_viterbi_backends.py          # every compiled backend, bit-exact-checked, then timed
-SPECTRACUDA_VITERBI_BACKEND=fast .venv/bin/python examples/benchmark_x86_stages_v3.py 32000 qam16   # end-to-end A/B vs the default
-```
+## Measured on the Pi-5 (aarch64, `examples/benchmark_viterbi_backends.py`, same day)
 
-If `fast` wins on the Pi-5 (the algorithmic reason it wins on x86 --
-no scalar gather -- applies at least as strongly on NEON), flip the
-`platform.machine()` condition in `ConvolutionalCode._select_native_backend`
-and `test_dispatch_keeps_neon_default_on_aarch64_until_measured`
-together, recording the measured number in this doc.
+| PDU | portable | NEON (previous ARM default) | **fast** |
+|---|---|---|---|
+| 24040 bits | 4.69 ms (195 ns/bit) | 2.95 ms (123 ns/bit) | **0.58 ms (24 ns/bit)** |
+| 32032 bits | 6.24 ms (195 ns/bit) | 3.92 ms (122 ns/bit) | **0.76 ms (24 ns/bit)** |
+
+**5.1x over the NEON kernel** (bit-exact-checked by the script before
+timing), so `fast` is now the default on aarch64 as well -- the
+dispatch's `platform.machine()` gate and
+`test_dispatch_prefers_fast_on_measured_architectures` were flipped
+together with this number. Expected effect on the Pi-5's RX (Viterbi
+was 4.55 ms of a ~7.2 ms QAM16/QAM64 frame): ~3.9 ms/frame, i.e. inside
+the 4 Msps budget at QAM16 -- to be confirmed with
+`benchmark_x86_stages_v3.py 32000 qam16` there. `SPECTRACUDA_VITERBI_BACKEND=neon`
+still forces the old kernel for any later comparison.
 
 ## If resuming here
 - The kernel is ~16 ns/bit on x86 with plenty of headroom: the inner

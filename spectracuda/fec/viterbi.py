@@ -162,12 +162,12 @@ class ConvolutionalCode(Block):
         # swap discards warmup step 0, so the first received symbol pair
         # never contributes. Measured on the x86 dev box: 16 ns/bit vs
         # SSE4.1's 48 (0.50 vs 1.50 ms for a 32032-bit PDU, 3x), so it is
-        # preferred over SSE there. On AArch64 it has NOT yet been
-        # measured against the NEON kernel on real hardware, so NEON
-        # stays the default there until it is (same rule as every
-        # promotion above); SPECTRACUDA_VITERBI_BACKEND=fast opts in for
-        # exactly that A/B (examples/benchmark_viterbi_backends.py
-        # drives every compiled backend directly, dispatch aside).
+        # preferred over SSE there. On the Pi-5 (aarch64), measured the
+        # same day: 24 ns/bit vs the NEON kernel's 122 (5.1x), so it is
+        # preferred over NEON too. SPECTRACUDA_VITERBI_BACKEND=sse|neon|
+        # portable|python forces any backend for a later A/B
+        # (examples/benchmark_viterbi_backends.py drives every compiled
+        # backend directly, dispatch aside).
         self._native = self._select_native_backend() if self.backend == "numpy" else None
 
         # Forward transition table (plain numpy -- tiny, built once,
@@ -209,7 +209,13 @@ class ConvolutionalCode(Block):
             return cls()
         if hexagon_available():
             return NativeConvolutionalHexagon()
-        if fast_available() and platform.machine() in ("x86_64", "AMD64"):
+        # Measured on both real targets before being preferred here (see
+        # docs/2026-09-09-fast-viterbi-kernel.md): x86_64 16 vs SSE4.1's
+        # 48 ns/bit (3x); Pi-5 aarch64 24 vs NEON's 122 ns/bit (5.1x, the
+        # 32032-bit PDU 3.92 -> 0.76 ms). Other architectures compile the
+        # generic vector-extension backend, which is unmeasured, so they
+        # keep the portable path unless SPECTRACUDA_VITERBI_BACKEND=fast.
+        if fast_available() and platform.machine() in ("x86_64", "AMD64", "aarch64", "arm64"):
             return NativeConvolutionalFast()
         if sse_available():
             return NativeConvolutionalSSE()
