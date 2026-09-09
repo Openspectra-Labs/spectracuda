@@ -46,6 +46,7 @@ import numpy as np
 
 from ..block import Block
 from ..registry import register
+from ._numba_schmidl_cox import numba_available, numba_process
 
 
 @register("sync", "schmidl_cox")
@@ -93,6 +94,20 @@ class SchmidlCoxSync(Block):
         n_samples = rx.shape[-1]
         if n_samples < 2 * L:
             raise ValueError(f"need at least {2 * L} samples, got {n_samples}")
+
+        # Transparent Numba-JIT acceleration (see
+        # sync/_numba_schmidl_cox.py's own module docstring -- a fused
+        # single-pass sliding-window correlation replacing the ~10
+        # separate full-array numpy passes below). Only for backend=
+        # "numpy": unlike fec/crc.py's numba dispatch, cupy inputs are
+        # NOT coerced to host numpy here -- doing so would reintroduce
+        # exactly the hidden device<->host round-trip that regressed the
+        # full-pipeline GPU run once already (see docs/todo.md's GPU/LDPC
+        # findings); backend="cupy" keeps using the xp-vectorized path
+        # below, which is the one actually meant to run on-device.
+        if self.backend != "cupy" and numba_available():
+            start_index, peak_metric = numba_process(np.asarray(rx), L)
+            return {"start_index": start_index, "metric": peak_metric}
 
         # a[n] = conj(r[n]) * r[n+L]; b1[n] = |r[n]|^2, b2[n] = |r[n+L]|^2.
         # P(d)/R(d) are windowed sums over m=0..L-1, computed for every
