@@ -81,7 +81,9 @@ _CONV_C_FILES = [
 ]
 _C_FILES = _CONV_C_FILES + [
     os.path.join(_SRC_DIR, "src", "reed-solomon", f)
-    for f in ("polynomial.c", "reed-solomon.c", "encode.c", "decode.c")
+    # batch.c is spectracuda's own (see its header comment): one C call
+    # per PDU instead of one ctypes round trip per RS block.
+    for f in ("polynomial.c", "reed-solomon.c", "encode.c", "decode.c", "batch.c")
 ]
 # SSE4.1-accelerated Viterbi decode (see sse_available()'s own docstring
 # for the two-part x86_64-and-runtime-cpuid gate this requires before
@@ -197,6 +199,17 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
     ]
     lib.correct_reed_solomon_create.restype = ctypes.c_void_p
     lib.correct_reed_solomon_create.argtypes = [ctypes.c_uint16, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_size_t]
+    # batched entry points (src/reed-solomon/batch.c, spectracuda's own)
+    lib.correct_reed_solomon_encode_batch.restype = ctypes.c_ssize_t
+    lib.correct_reed_solomon_encode_batch.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t,
+    ]
+    lib.correct_reed_solomon_decode_batch.restype = ctypes.c_ssize_t
+    lib.correct_reed_solomon_decode_batch.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_ssize_t),
+    ]
     lib.correct_reed_solomon_destroy.argtypes = [ctypes.c_void_p]
     lib.correct_reed_solomon_encode.restype = ctypes.c_ssize_t
     lib.correct_reed_solomon_encode.argtypes = [
@@ -843,10 +856,45 @@ class NativeReedSolomon:
         decoded_full = np.frombuffer(bytes(msg_out[:n_written]), dtype="uint8")
         return decoded_full[_RS_K - real_k:]
 
+    # encode()/decode() below make ONE ctypes call per batch (src/reed-
+    # solomon/batch.c) with the padding laid out as a single vectorized
+    # numpy op, instead of one call + one concatenate + one frombuffer per
+    # block: measured 26.7 -> ~11 us/block on x86 (58% of the RS RX line
+    # was that glue). _encode_one()/_decode_one() above are kept as the
+    # per-block reference the batched path is verified byte-identical
+    # against (tests/test_fec_reed_solomon_batch.py).
+
     def encode(self, msg: np.ndarray) -> np.ndarray:
-        msg = np.asarray(msg, dtype="uint8")
-        return np.stack([self._encode_one(msg[b]) for b in range(msg.shape[0])])
+        msg = np.ascontiguousarray(np.asarray(msg, dtype="uint8"))
+        n_blocks, real_k = msg.shape
+        full_msgs = np.zeros((n_blocks, _RS_K), dtype="uint8")
+        full_msgs[:, _RS_K - real_k:] = msg
+        encoded = np.empty((n_blocks, _RS_N), dtype="uint8")
+        r = _lib.correct_reed_solomon_encode_batch(
+            self._rs,
+            full_msgs.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), n_blocks, _RS_K,
+            encoded.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), _RS_N,
+        )
+        if r < 0:
+            raise RuntimeError("native Reed-Solomon batch encode failed")
+        return np.concatenate([msg, encoded[:, _RS_K:]], axis=1)
 
     def decode(self, codeword: np.ndarray) -> np.ndarray:
-        codeword = np.asarray(codeword, dtype="uint8")
-        return np.stack([self._decode_one(codeword[b]) for b in range(codeword.shape[0])])
+        codeword = np.ascontiguousarray(np.asarray(codeword, dtype="uint8"))
+        n_blocks, length = codeword.shape
+        real_k = length - _RS_NROOTS
+        full_codewords = np.zeros((n_blocks, _RS_N), dtype="uint8")
+        full_codewords[:, _RS_K - real_k:_RS_K] = codeword[:, :real_k]
+        full_codewords[:, _RS_K:] = codeword[:, real_k:]
+        msgs_out = np.empty((n_blocks, _RS_K), dtype="uint8")
+        n_written = np.empty(n_blocks, dtype=np.intp)  # ssize_t per block
+        _lib.correct_reed_solomon_decode_batch(
+            self._rs,
+            full_codewords.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), n_blocks, _RS_N,
+            msgs_out.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), _RS_K,
+            n_written.ctypes.data_as(ctypes.POINTER(ctypes.c_ssize_t)),
+        )
+        if n_blocks and bool(np.any(n_written <= 0)):
+            # same contract as _decode_one(): never silently return wrong bits
+            raise ValueError("native Reed-Solomon decode failed (uncorrectable codeword)")
+        return msgs_out[:, _RS_K - real_k:]

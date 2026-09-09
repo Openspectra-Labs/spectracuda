@@ -113,6 +113,22 @@ modulation. Remaining RX ranking there (QAM16): "everything else"
 0.33, chanest+eq 0.31. `SPECTRACUDA_VITERBI_BACKEND=neon` still forces
 the old kernel for any later comparison.
 
+## Follow-up the same day: batched Reed-Solomon (`src/reed-solomon/batch.c`)
+
+With Viterbi fixed, Reed-Solomon was the next FEC line (0.69 ms at 32k
+bits, 1.32 ms at 64k on the Pi-5). Measured on x86: 26.7 us/block as
+wired vs 11.3 us/block for the bare C calls -- 58% of the line was
+Python glue (one ctypes round trip + a concatenate + a frombuffer per
+255-byte block, 36 blocks per 64k-bit PDU). `batch.c` moves the per-block
+loop into C (calling upstream's unchanged encode/decode per block), and
+`NativeReedSolomon.encode()/decode()` now make ONE call per batch with
+the padding laid out by a single vectorized numpy op. Byte-identical to
+the per-block path (`tests/test_fec_reed_solomon_batch.py`: clean,
+<=16 corrected errors, shortened blocks down to k=1, non-contiguous
+views, uncorrectable block still raises). x86, 36 blocks: decode
+0.92 -> 0.40 ms, encode 0.66 -> 0.52 ms. Not yet re-measured on the
+Pi-5 (expect the 1.32 ms RX line at 64k to roughly halve).
+
 ## If resuming here
 - The kernel is ~16 ns/bit on x86 with plenty of headroom: the inner
   step is ~40 vector ops and the decision slices are written
