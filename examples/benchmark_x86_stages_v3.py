@@ -405,6 +405,26 @@ def run() -> None:
           f"({'OK' if tx_time*1000 <= budget_ms else f'{budget_ms/(tx_time*1000):.2f}x short'} of 20 Msps, budget {budget_ms:.4f} ms)")
     print(f"  RX: {rx_total:.4f} ms/frame -> ~{rx_mbps:.2f} Mbps -> ~{rx_msps:.2f} Msps "
           f"({'OK' if rx_total <= budget_ms else f'{budget_ms/rx_total:.2f}x short'} of 20 Msps, budget {budget_ms:.4f} ms)")
+
+    # -- Real SDU-level throughput: SDU_BITS (fixed, whatever payload the
+    # caller asked for) over the TOTAL wall time across every frame the
+    # SDU actually took, not just one frame in isolation. The two lines
+    # above are legitimate PER-FRAME rates (bits carried by exactly one
+    # frame / that frame's time) -- correct in isolation, but only
+    # comparable ACROSS RUNS when every run uses the same PDU/frame count
+    # per SDU. Modulation order changes how many PDUs a fixed SDU needs
+    # (n_pdus_per_round above), which shifts how much per-frame header/FEC
+    # overhead gets paid -- so the per-frame Mbps above can go DOWN when a
+    # scheme is actually delivering the SDU faster overall. This line is
+    # the one to compare across different modem/SDU-size runs.
+    sdu_tx_ms = tx_time * 1000 * n_pdus_per_round
+    sdu_rx_ms = rx_total * n_pdus_per_round
+    real_tx_mbps = SDU_BITS / sdu_tx_ms / 1000
+    real_rx_mbps = SDU_BITS / sdu_rx_ms / 1000
+    print(f"\n=== Real SDU-level throughput ({SDU_BITS} payload bits over ALL "
+          f"{n_pdus_per_round} frame(s)/SDU -- the number to compare ACROSS runs) ===")
+    print(f"  TX: {SDU_BITS} bits / {sdu_tx_ms:.4f} ms -> ~{real_tx_mbps:.2f} Mbps")
+    print(f"  RX: {SDU_BITS} bits / {sdu_rx_ms:.4f} ms -> ~{real_rx_mbps:.2f} Mbps")
     print(f"  (bottleneck: {'TX' if tx_time*1000 > rx_total else 'RX'})")
 
 
