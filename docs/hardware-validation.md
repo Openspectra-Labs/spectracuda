@@ -6,6 +6,24 @@ loopback. This page pulls forward the headline results; the full session
 records (every bug found, every measurement, every open question) are
 linked at the bottom of each section.
 
+## Why this platform is useful
+
+The Raspberry Pi 5 + ADALM-PLUTO combination turns spectracuda into a rapid
+custom-OFDM prototyping platform. The same Python configuration used for
+simulation supplies the frame format and receiver on the radio host, so a
+change to the modem, FEC chain, pilot allocation, synchronizer, channel
+estimator, equalizer, or MAC policy can move from a deterministic test to an
+over-the-air experiment without rewriting the design in MATLAB or generating
+a separate implementation first.
+
+This does not mean simulation and hardware are interchangeable. Real tests
+exposed effects that a clean loopback did not: nearby WiFi triggering the
+Schmidl--Cox detector, preambles crossing Pluto receive-buffer boundaries,
+USB capture-rate limits, oscillator offset, multipath, gain scaling, and
+driver teardown behavior. The value of the platform is that those discoveries
+feed directly back into the same open Python implementation and regression
+suite used to design the link.
+
 ## The FEC chain has never been the failure point
 
 Across an entire characterization session — every frequency tested, all

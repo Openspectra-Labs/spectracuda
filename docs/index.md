@@ -46,6 +46,40 @@ with no code change beyond that one string, and this exact link design has
 been run and validated over the air on real PlutoSDR hardware, not only in
 simulation — see {doc}`hardware-validation` for the actual numbers.
 
+## From an OFDM idea to real RF without MATLAB
+
+spectracuda is intended to shorten the complete custom-radio development
+loop, not only the simulation step. A link can be designed, impaired, and
+tested on a normal development machine, then run with the same PHY and frame
+format on a Raspberry Pi 5 connected to an ADALM-PLUTO. The project includes
+the pieces that are otherwise often assembled across a MATLAB model, generated
+code, and separate radio scripts:
+
+- configurable OFDM framing, pilots, cyclic prefix, modulation, CRC, FEC,
+  synchronization, CFO correction, channel estimation, and equalization;
+- reproducible AWGN, multipath, CFO, fixed-point, and packet-loss experiments;
+- batch and arbitrary-chunk streaming receive APIs;
+- TM/UM/AM-style MAC behavior, segmentation, binding, status reporting, and
+  retransmission;
+- NumPy reference paths plus Numba, native C/SIMD, CuPy, and experimental
+  FPGA/HLS implementation paths;
+- runnable PlutoSDR transports and two-node examples rather than a
+  simulation-only hardware placeholder.
+
+MATLAB remains useful for teams that already depend on its toolboxes, but it
+is not required anywhere in the spectracuda workflow. The Python source is the
+executable reference model, the test oracle for optimized implementations,
+and the code that runs on the radio host. That removes a translation boundary:
+an algorithm does not have to be recreated in a second environment before it
+can be exercised over the air.
+
+This workflow has been used on two physically separate Raspberry Pi 5 +
+ADALM-PLUTO nodes over real RF. The recorded tests cover QPSK, 16-QAM, and
+64-QAM, concatenated Reed--Solomon + convolutional FEC, LS channel estimation,
+MMSE equalization, streaming frame capture, and frequency sweeps in real
+interference. Those results, including the observed failures and current
+limits, are reported in {doc}`hardware-validation`.
+
 GPU-accelerated, liquid-dsp-inspired SDR PHY (+ MAC) framework for NVIDIA
 Jetson (Orin Nano first, NX/AGX Orin and desktop CUDA GPUs as additional
 targets).
@@ -141,6 +175,8 @@ book/roadmap
 :caption: Reference
 
 architecture
+comparison
+fec
 fec-c-lib-acceleration
 hexagon-fec-offload-plan
 mac
