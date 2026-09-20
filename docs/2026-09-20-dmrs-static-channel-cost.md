@@ -1,226 +1,289 @@
-# RESOLVED: the "DMRS costs 3-6% on a static channel" finding was a measurement artifact
+# Resolved: the apparent DMRS static-channel cost was a simulation artifact
 
-Status: **resolved 2026-09-20. There is no static-channel penalty.** The
-original claim in this file was wrong; it came from two flaws in the
-simulation harness, not from the receiver. Corrected numbers below.
+**Status: resolved 2026-09-20. No static-channel DMRS packet-delivery penalty
+was reproduced after correcting the experiment.**
 
-Related: `docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md` (the
-feature, steps 1-6 implemented on branch
-`feat/dmrs-periodic-channel-refresh`).
+Related:
 
----
+- `docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md` — the feature;
+- `tests/test_ofdm_dmrs_rx.py` — controlled time-varying-channel validation;
+- `docs/2026-09-06-rx-packet-loss-and-ism-band-characterization.md` — real
+  Pi/Pluto packet-loss investigation.
 
 ## Summary
 
-An earlier version of this document reported that enabling DMRS cost
-3-6 percentage points of packet delivery on a static channel, and
-proposed an unverified estimator-noise hypothesis to explain it.
+An earlier simulation appeared to show that enabling DMRS reduced delivery by
+roughly 3–6 percentage points when the channel was not changing. That result
+was not caused by channel-estimation quality or by DMRS equalization.
 
-Both the finding and the hypothesis were wrong. The measurement harness
-had two defects that together manufactured an apparent,
-interval-dependent packet error rate out of nothing. With both fixed,
-**every DMRS interval delivers 600/600 frames on a frozen channel** at
-16/18/20/24 dB.
+The simulated capture ended exactly at the last transmitted sample. Multipath
+occasionally made synchronization select a start one sample late. The receiver
+then needed one sample beyond the end of the supplied array and correctly
+rejected it as truncated. The experiment counted this extraction failure as a
+failed packet even though payload decoding was never attempted.
 
-The high-Doppler benefit is real and, once measured correctly, is
-cleaner and larger than what was originally published.
+DMRS intervals produced different frame lengths. A second measurement flaw
+made the same random seed generate different preamble noise for those lengths,
+so each interval experienced a different number of one-sample-late timing
+decisions. Those differing truncation counts looked like a DMRS-dependent
+packet-delivery cost.
 
----
+Appending realistic trailing capture samples removed the effect. Across the
+full frozen-channel matrix—OFF/16/32/64 at 16/18/20/24 dB—all 2,400 frames
+passed CRC.
 
-## The two harness defects
+**Conclusion: there is no evidence that refreshing `H[k]` harms static-channel
+packet delivery under the stated test configuration.**
 
-### 1. Frames ended flush with the simulated array
+## Background: what DMRS does
 
-Multipath sometimes moves the detected frame start one sample late. The
-simulated IQ array ended exactly at the last transmitted sample, so with
-`start_index = 1` the payload extraction needed one sample past the end,
-and the bounds check in `_decode_payload_from_header()` raised.
+An OFDM receiver sends a known training symbol near the start of every frame.
+Because the receiver knows what that symbol should look like, it can measure
+the channel response `H[k]` on each subcarrier and undo the channel's effect on
+the following payload.
 
-The sweep counted that raise as a failed packet — but the payload decode
-was never attempted. It was a simulation boundary, not a decode failure.
+That initial measurement can become stale during a long frame if the radios or
+reflectors move. A DMRS is the same known training waveform transmitted again
+inside the payload region. Data after that DMRS uses the refreshed estimate.
 
-A real capture always contains samples after a frame, so this cannot
-happen on the air.
+DMRS can therefore help when all of the following are true:
 
-At 18 dB, 150 trials with no trailing samples:
+1. the receiver detected the frame;
+2. the header was decoded;
+3. the payload arrived;
+4. the frequency-selective channel changed enough during the frame that the
+   initial `H[k]` was no longer accurate.
 
-| interval | passed | bounds failures |
-|---|---|---|
+DMRS cannot recover a frame whose preamble was missed, a capture dropped by
+the host, or a receiver distracted by an unrelated Wi-Fi preamble. It also
+does not repair a frame that never reached payload decoding.
+
+## Original observation
+
+The original experiment used:
+
+```text
+fft_size=256
+cp_len=32
+n_data=216
+n_pilot=8
+QPSK
+RS + convolutional FEC with block interleaving
+22,768-bit PDU
+10 MSps
+two-ray channel: direct path + half-strength one-sample-delayed echo
+```
+
+The frozen-channel table appeared to show a small delivery difference between
+DMRS OFF/16/32/64. Individual differences were close to their sampling error,
+and the signs were not actually uniform: interval 64 at 16 dB performed better
+than OFF. The original description overstated the consistency and precision of
+that evidence.
+
+More importantly, the table combined payload failures with frames rejected as
+truncated before payload decoding. That made it unsuitable for diagnosing
+channel-estimator behavior.
+
+## Root cause
+
+### 1. The capture ended flush with the frame
+
+The impairment function returned an IQ array with exactly the same length as
+the transmitted frame. There were no samples after the last OFDM symbol.
+
+In a real streaming capture, samples normally continue after a frame. A
+bounded simulation must model that by including a trailing guard or subsequent
+stream samples.
+
+### 2. Multipath sometimes moved timing one sample later
+
+The synchronizer occasionally selected `start_index=1` instead of zero. A
+one-sample residual timing offset is normally harmless because it is inside the
+32-sample cyclic prefix.
+
+It became fatal only because the artificial input buffer ended at the exact
+frame boundary:
+
+```text
+correct start: receiver asks for samples 0 ... last
+late by one:   receiver asks for samples 1 ... last+1
+                                               ^ absent
+```
+
+The receiver's bounds check raised `ValueError` for a truncated frame. This was
+reported as a packet failure, but CRC decoding had not run.
+
+### 3. “Same seed” did not mean the same preamble noise
+
+The simulation generated noise using two consecutive calls:
+
+```python
+rng.standard_normal(rx.shape)       # all real samples
+rng.standard_normal(rx.shape)       # all imaginary samples
+```
+
+DMRS changes the array length. The second call therefore begins at a different
+position in the random-number stream for each interval. Even with the same
+seed, different-length frames receive different imaginary noise at the
+preamble.
+
+That changed how often the synchronizer selected sample zero versus sample
+one. The resulting interval-dependent bounds failures were mistaken for
+interval-dependent decoding performance.
+
+## Decisive experiments
+
+### Paired boundary experiment
+
+At 18 dB, 150 trials per interval without trailing samples produced:
+
+| Interval | CRC pass | Truncation before payload decode |
+|---:|---:|---:|
 | OFF | 115 | 35 |
 | 16 | 132 | 18 |
 | 32 | 118 | 32 |
 | 64 | 116 | 34 |
 
-Every single failure was the one-sample timing offset. Appending 1024
-trailing zeros: 150/150 for every interval.
+Every failure corresponded to the one-sample-late boundary condition.
 
-### 2. The noise depended on the frame length
+After appending 1,024 trailing zero samples, the same experiment produced
+150/150 passes at every interval.
 
-The channel helper generated complex noise as:
+### Complete frozen-channel rerun
 
-```python
-rx + s * (rng.standard_normal(rx.shape) + 1j * rng.standard_normal(rx.shape))
-```
+With trailing samples included, 150 trials were run for every interval at each
+SNR:
 
-Two separate draws. The second starts wherever the first ended, so **the
-imaginary part depends on the array length**:
+| SNR | OFF | 16 | 32 | 64 |
+|---:|---:|---:|---:|---:|
+| 16 dB | 150/150 | 150/150 | 150/150 | 150/150 |
+| 18 dB | 150/150 | 150/150 | 150/150 | 150/150 |
+| 20 dB | 150/150 | 150/150 | 150/150 | 150/150 |
+| 24 dB | 150/150 | 150/150 | 150/150 | 150/150 |
 
-```
-len=100: real [ 0.3047 -1.04    0.7505]   imag [-0.3782  1.2992 -0.3563]
-len=101: real [ 0.3047 -1.04    0.7505]   imag [ 1.2992 -0.3563  0.7375]
-                                                 ^ shifted by one draw
-```
+Total: 2,400/2,400 CRC-valid frames.
 
-Different DMRS intervals produce different frame lengths, so the same
-seed handed each interval **different noise on the preamble**. Different
-preamble noise means different sync behaviour, which means a different
-number of one-sample-late timing estimates per interval — which is
-exactly the interval-dependent PER that looked like a DMRS cost.
+### Same received frame, different estimate policy
 
-The two defects compound: defect 2 varies how often defect 1 fires.
+To separate estimate replacement from slot layout, the exact same received
+DMRS-bearing IQ frame was decoded four ways:
 
----
+1. normal refreshed estimates;
+2. reuse the initial training estimate for all segments;
+3. phase-align each refreshed estimate to the initial estimate;
+4. average each phase-aligned refresh 50/50 with the initial estimate.
 
-## Corrected results
+At 18 dB all four policies passed 80/80 frames. Mean EVM was:
 
-Methodology now: trailing capture samples appended; paired complex noise
-drawn once at a fixed maximum length and sliced, so every interval sees
-identical noise; bounds/extraction failures counted separately from CRC
-failures.
+| Estimate policy | Mean EVM |
+|---|---:|
+| normal DMRS refresh | 0.21796 |
+| reuse initial `H[k]` | 0.21822 |
+| 50% averaging | 0.19720 |
 
-Config: `fft_size=256, cp_len=32, n_data=216, qpsk`, `rs_m8 + conv_v27`
-with block interleaving, 22768-bit PDU, 10 MSps.
+Normal refresh and reuse were effectively equal for packet delivery and EVM.
+This directly rules out the earlier claim that ordinary refreshed estimates
+caused the observed delivery gap.
 
-### Frozen channel — no penalty
+The averaging result may be useful future estimator work, but it is not needed
+to resolve this issue and should not be promoted without time-varying-channel
+tests showing that smoothing preserves tracking performance.
 
-150 trials per cell, zero bounds failures throughout.
+## What remains valid from the Doppler experiment
 
-| SNR | OFF | every 16 | every 32 | every 64 |
-|---|---|---|---|---|
-| 16 dB | 100% | 100% | 100% | 100% |
-| 18 dB | 100% | 100% | 100% | 100% |
-| 20 dB | 100% | 100% | 100% | 100% |
-| 24 dB | 100% | 100% | 100% | 100% |
+The controlled two-ray tests still demonstrate the intended mechanism:
 
-600/600 for every interval. **DMRS is free when there is nothing to
-track.**
+- without refresh, late-frame EVM rises when the frequency-selective channel
+  changes quickly;
+- with refresh, late-frame EVM remains approximately flat;
+- a frame that fails CRC without DMRS can pass with DMRS;
+- denser intervals track faster changes better.
 
-Cross-check on the same received frames, decoded four ways at 18 dB —
-normal refresh, initial estimate reused throughout, phase-aligned
-refresh, and 50% averaging — all passed 80/80, with normal refresh and
-reuse showing essentially identical EVM (0.21796 vs 0.21822). No
-estimator-quality difference to find.
+Those conclusions are also covered by focused tests that include trailing
+samples. However, the earlier PER percentages and claimed location of the
+Doppler cliff must be rerun with:
 
-### Doppler sweep — the benefit, measured properly
+- trailing capture samples;
+- paired noise that is identical over common sample positions;
+- separate counters for sync miss, header failure, truncation, CRC failure,
+  and successful delivery;
+- finer Doppler points if a threshold such as `f_d*T = 0.25` is to be claimed.
 
-Two-ray channel, half-strength echo one sample late, echo phase rotating
-at `fd`. SNR 20 dB, 150 trials, zero bounds failures.
+The old sample grid only showed that the OFF-path transition occurred somewhere
+between tested points; it did not precisely establish a 0.19–0.25 threshold.
 
-| fd | `f_d*T_frame` | OFF | every 16 | every 32 | every 64 |
-|---|---|---|---|---|---|
-| 0 | 0.000 | 100% | 100% | 100% | 100% |
-| 25 Hz | 0.094 | 100% | 100% | 100% | 100% |
-| 50 Hz | 0.188 | 99% | 100% | 100% | 100% |
-| 75 Hz | 0.283 | **0%** | 100% | 100% | 100% |
-| 100 Hz | 0.377 | **0%** | 100% | 100% | 93% |
-| 150 Hz | 0.565 | **0%** | 100% | 100% | **0%** |
-| 200 Hz | 0.754 | **0%** | 100% | 98% | **0%** |
+## Resolution
 
-Cleaner than the contaminated version: DMRS-on holds at 100% exactly
-where DMRS-off collapses to 0%, with no cost anywhere.
+No DMRS estimator change is required for this issue.
 
-### Every cliff lands on `f_d * T_refresh ~ 0.25`
+Simulation and future measurement code should:
 
-The most useful thing to come out of the corrected run. Each setting
-fails when the channel turns over by about a quarter cycle *between its
-own refreshes* — not between frames:
+1. append enough trailing samples to cover synchronization uncertainty and
+   channel delay;
+2. generate one maximum-length complex noise realization and slice it for
+   different frame lengths, or use separate deterministic real/imaginary RNG
+   streams whose common prefix does not depend on array length;
+3. use paired payload and noise seeds across OFF/16/32/64 comparisons;
+4. classify failure stage rather than treating every exception as a CRC fail;
+5. compare channel estimates only after accounting for common phase from
+   residual CFO.
 
-| setting | refresh period | predicted cliff | observed |
-|---|---|---|---|
-| OFF | 3.77 ms (whole frame) | 66 Hz | between 50 and 75 Hz |
-| every 64 | 1.84 ms | 136 Hz | between 100 and 150 Hz |
-| every 32 | 0.92 ms | 271 Hz | still 98% at 200 Hz |
-| every 16 | 0.46 ms | 543 Hz | still 100% at 200 Hz |
+The one-sample late-start/end-of-buffer behavior remains separate receiver/test
+harness technical debt. It is not evidence of DMRS degradation.
 
-Four independent cliffs, all consistent with the standard `0.25`
-guideline. This is a measured confirmation of the interval ladder,
-arrived at without relying on any external spec's assertion.
+## Operational meaning for the real link
 
----
+DMRS is not a general cure for packet loss. It addresses one specific failure:
+the receiver found the frame, but the channel estimate became stale before the
+end of a long payload.
 
-## What this means for using DMRS
+There is strong hardware evidence that SpectraCUDA previously had an in-frame
+aging problem. Before per-symbol pilot tracking, approximately 90% of 64-byte
+packets arrived, while only about 5–10% of 1,024/2,048-byte packets arrived;
+128/246-byte packets were already losing roughly 40–50%. After pilot tracking,
+2,048-byte delivery rose to about 95% in a clean channel and 75–80% in a noisy
+channel. The dependence on frame duration, followed by the large pilot-tracking
+improvement, is compelling evidence that accumulated error within the frame
+was real.
 
-Simpler than before, because the trade-off it was hedging against does
-not exist:
+That result identifies the dominant old error more specifically than “bad
+`H[k]`”: the pilots correct a common phase rotation shared by subcarriers,
+normally residual CFO. Periodic DMRS complements them by refreshing the
+frequency-dependent channel shape—relative gain and phase across subcarriers.
+DMRS may improve the remaining long-frame loss if that shape changes, but it
+cannot improve the part already caused by acquisition failure or unrelated
+interference.
 
-- **DMRS is free when the channel is static.** No reason to avoid it.
-- **DMRS is the difference between a working and a dead link** once
-  `f_d * T_refresh` exceeds about 0.25.
-- Pick the interval so `T_refresh` stays under `0.25 / f_d` for the
-  fastest closing speed you need to support.
+The existing Pi/Pluto characterization found that much of the observed loss in
+the lab occurred earlier: nearby Wi-Fi repeatedly triggered the Schmidl-Cox
+detector, causing genuine SpectraCUDA preambles to be missed. DMRS is inside the
+payload, so it cannot help a receiver that never acquired the frame.
 
-For context, at a ~1 ms transmission opportunity the whole frame is
-already inside the budget up to ~250 Hz Doppler (112 km/h at 2.4 GHz,
-46 km/h at 5.8 GHz), so short frames still do not need DMRS. It is long
-frames and fast platforms that do.
+For an observed 25% loss rate on a roughly 3 ms frame, determine the failure
+stage before predicting a DMRS gain:
 
-Still simulated. Whether the real link sees enough channel variation for
-this to matter is step 7 of the plan, on the Pi-5 / two-Pluto rig; it
-cannot be measured on the WSL2 dev machine, which tunnels all USB over
-TCP.
+| Observation | Likely failure | Will DMRS help? |
+|---|---|---|
+| no frame/header result | preamble missed, false trigger, capture loss | **No** |
+| frame found, CRC failure grows toward frame end | stale `H[k]` | **Likely** |
+| frame found, similar errors throughout payload | low SNR/interference/static fade | Usually not |
+| late-frame EVM improves with DMRS | channel aging confirmed | **Yes** |
 
----
+The long-packet history justifies testing DMRS on the real link rather than
+dismissing it as an acquisition-only problem. Interval 32 is the natural first
+setting at 10 MSps. Split results into acquisition success and CRC success, and
+compare early- versus late-frame EVM: an unchanged detection rate together
+with improved late-frame EVM/CRC delivery is the signature that DMRS is
+recovering the remaining frequency-selective channel aging.
 
-## Remaining real technical debt (separate from DMRS)
+## Code map
 
-**The receiver's one-sample-late timing under multipath is real**, and
-independent of DMRS — it reproduces with `dmrs_interval=0`. It is benign
-on the air because a real capture has trailing samples, so it does not
-imply any DMRS regression. But it is worth understanding on its own:
-whether the sync peak is genuinely landing a sample late under
-multipath, or whether the frame-start convention is off by one.
-
-It is not tracked here; this file is about the DMRS measurement.
-
----
-
-## Lessons for future PHY simulation work
-
-These cost a day and are easy to repeat:
-
-1. **Always append trailing capture samples.** A frame ending flush with
-   the array turns an ordinary sync offset into a fake packet loss.
-2. **Generate paired complex noise independently of frame length.**
-   `standard_normal(n)` twice couples the imaginary part to `n`. Draw
-   once at a fixed maximum length and slice, or use
-   `standard_normal((2, n))`. Otherwise any change that alters frame
-   length silently changes the noise realization, and A/B comparisons
-   are invalid.
-3. **Count extraction/bounds failures separately from CRC failures.** A
-   harness that lumps "the decoder raised" in with "the CRC failed"
-   cannot tell a real regression from a harness bug. An earlier sweep in
-   this same effort printed all zeros for a completely unrelated reason
-   (an oversized PDU) because a bare `except Exception: pass` swallowed
-   the `ValueError`.
-4. **Sanity-check A/B comparisons against a control** where the effect
-   under test is switched off by construction. Here, `fd = 0` with
-   DMRS-off passing 100% would have exposed the artifact immediately.
-
-The test helper in `tests/test_ofdm_dmrs_rx.py::time_varying_two_ray`
-now implements 1 and 2, with the reasoning inline so it does not get
-"simplified" back.
-
----
-
-## Where the code is
-
-| what | where |
+| Purpose | Location |
 |---|---|
-| slot arithmetic (pure, no OFDM) | `spectracuda/framing/dmrs.py` |
-| DMRS estimate from a slot | `Ofdm._estimate_channel_from_dmrs()` |
-| per-segment estimate expansion | `Ofdm._expand_over_segments()` |
-| where it is applied | `Ofdm._decode_payload_from_header()` |
-| training estimate for comparison | `Ofdm._decode_header_from_sync()` |
-| header field (2 bits, byte 5 [6:5]) | `spectracuda/framing/header.py` |
-| corrected channel helper | `tests/test_ofdm_dmrs_rx.py` |
-| tests | `tests/test_ofdm_dmrs_*.py`, `tests/test_framing_dmrs.py` |
+| slot arithmetic | `spectracuda/framing/dmrs.py` |
+| DMRS channel estimate | `Ofdm._estimate_channel_from_dmrs()` |
+| per-segment expansion | `Ofdm._expand_over_segments()` |
+| payload equalization | `Ofdm._decode_payload_from_header()` |
+| initial training estimate | `Ofdm._decode_header_from_sync()` |
+| header field | `spectracuda/framing/header.py` |
+| focused tests | `tests/test_ofdm_dmrs_*.py` |
