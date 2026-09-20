@@ -38,7 +38,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from ..fec.ldpc_tables import BASE_MATRICES as _LDPC_BASE_MATRICES
-from .c2 import C2_MAX_BYTES
+from .c2 import C2_MAX_BYTES, check_c2_len
 from .dmrs import DMRS_PERIOD_CODES, DMRS_PERIOD_INTERVALS
 
 MOD_SCHEME_CODES = {"bpsk": 0, "qpsk": 1, "qam16": 2, "qam64": 3, "qam256": 4}
@@ -135,14 +135,12 @@ class HeaderCodec:
             raise ValueError(
                 f"crc0={crc0!r} has no header code; supported: {sorted(CRC_SCHEME_CODES)}"
             )
-        if not (0 <= c2_len_bytes <= C2_MAX_BYTES):
-            # Checked against the POLICY cap, not the field width: the
-            # field is 16 bits and could carry more, which is what lets
-            # decode reject an over-large value as corruption.
-            raise ValueError(
-                f"c2_len_bytes={c2_len_bytes} outside 0..{C2_MAX_BYTES} "
-                f"(C2_MAX_BYTES; 0 means no C2 region)"
-            )
+        # Checked against the POLICY cap, not the field width: the field
+        # is 16 bits and could carry more, which is what lets decode
+        # reject an over-large value as corruption. Shared with c2.py's
+        # own sizing helpers rather than duplicated -- two copies of a
+        # range check drift.
+        check_c2_len(c2_len_bytes)
         if dmrs_interval not in DMRS_PERIOD_INTERVALS:
             raise ValueError(
                 f"dmrs_interval={dmrs_interval!r} has no header code; supported: "

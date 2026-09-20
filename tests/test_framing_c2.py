@@ -149,3 +149,107 @@ def test_header_is_still_112_bits():
     codec = HeaderCodec()
     assert len(codec.encode_bits(1000, "qpsk", "none", None, "crc32", "none", 32, 320)) == 112
     assert HeaderCodec.HEADER_LEN_BITS == 112
+
+
+# -- derived sizing (step 2) ------------------------------------------
+#
+# n_c2_symbols() is THE number the transmitter and receiver must agree
+# on. It is not signalled: both sides derive it from c2_len_bytes plus
+# the fixed profile. If they ever disagree, both regions decode as
+# garbage, so these pin the arithmetic exactly rather than just
+# sanity-checking it.
+
+from spectracuda.framing.c2 import (  # noqa: E402
+    bits_per_c2_symbol,
+    c2_encoded_bits,
+    check_c2_len,
+    n_c2_symbols,
+)
+
+N_DATA = 216
+
+
+def test_bits_per_symbol_is_the_qpsk_rate_not_the_payload_rate():
+    """The C2 region never inherits the header-selected modulation."""
+    assert bits_per_c2_symbol(N_DATA) == N_DATA * 2
+    assert bits_per_c2_symbol(64) == 128
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_bits_per_symbol_rejects_nonsense_n_data(bad):
+    with pytest.raises(ValueError, match="n_data"):
+        bits_per_c2_symbol(bad)
+
+
+def test_zero_length_means_no_region_at_all():
+    """Not an empty-but-present region: zero symbols, zero bits, so a
+    c2_len_bytes=0 frame is byte-identical to one with no C2 support."""
+    assert c2_encoded_bits(0) == 0
+    assert n_c2_symbols(0, N_DATA) == 0
+
+
+@pytest.mark.parametrize("c2_len,expected_bits,expected_symbols", [
+    (1, 604, 2),
+    (16, 844, 2),
+    (64, 1612, 4),
+    (72, 1740, 5),
+    (128, 2636, 7),
+    (256, 5196, 13),
+    (320, 6220, 15),
+])
+def test_sizing_is_pinned_exactly(c2_len, expected_bits, expected_symbols):
+    """Exact values, not bounds. A change to the profile or to the
+    ceiling convention must break this test loudly -- it would
+    otherwise be a silent wire-format change that only shows up as a
+    decode failure between two versions."""
+    assert c2_encoded_bits(c2_len) == expected_bits
+    assert n_c2_symbols(c2_len, N_DATA) == expected_symbols
+
+
+def test_symbols_are_a_ceiling_not_a_floor():
+    """A partial last symbol is padded, never truncated -- truncating
+    would silently drop the tail of the C2 payload."""
+    for c2_len in range(1, 80):
+        encoded = c2_encoded_bits(c2_len)
+        n_sym = n_c2_symbols(c2_len, N_DATA)
+        assert n_sym * bits_per_c2_symbol(N_DATA) >= encoded
+        assert (n_sym - 1) * bits_per_c2_symbol(N_DATA) < encoded
+
+
+def test_sizing_is_monotonic_in_length():
+    """More C2 bytes must never need fewer symbols."""
+    prev = 0
+    for c2_len in range(0, C2_MAX_BYTES + 1, 8):
+        n = n_c2_symbols(c2_len, N_DATA)
+        assert n >= prev
+        prev = n
+
+
+def test_sizing_scales_with_the_grid():
+    """A narrower grid carries fewer bits per symbol, so the same C2
+    payload needs more symbols."""
+    assert n_c2_symbols(72, 108) > n_c2_symbols(72, 216)
+
+
+@pytest.mark.parametrize("bad", [-1, C2_MAX_BYTES + 1, 9000])
+def test_sizing_rejects_out_of_range_lengths(bad):
+    with pytest.raises(ValueError, match="c2_len_bytes"):
+        n_c2_symbols(bad, N_DATA)
+    with pytest.raises(ValueError, match="c2_len_bytes"):
+        c2_encoded_bits(bad)
+
+
+def test_header_and_sizing_share_one_validator():
+    """A second copy of the range check would drift from this one."""
+    with pytest.raises(ValueError, match="c2_len_bytes"):
+        check_c2_len(C2_MAX_BYTES + 1)
+    codec = HeaderCodec()
+    with pytest.raises(ValueError, match="c2_len_bytes"):
+        codec.encode_bits(100, "qpsk", "none", None, "crc32", "none", 0, C2_MAX_BYTES + 1)
+
+
+def test_max_c2_still_leaves_most_of_the_budget_for_payload():
+    """The operational constraint: C2 at its cap must not crowd out the
+    main payload. 15 of 128 slots leaves 113."""
+    assert n_c2_symbols(C2_MAX_BYTES, N_DATA) == 15
+    assert 128 - n_c2_symbols(C2_MAX_BYTES, N_DATA) == 113
