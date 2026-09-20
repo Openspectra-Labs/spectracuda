@@ -16,14 +16,24 @@ from spectracuda.modem import Modem
 
 
 def craft_header_bits(codec, overrides):
-    """Build header bits with raw byte overrides, bypassing encode_bits'
-    validation -- the only way to produce the corrupted values a decoder
-    has to survive."""
-    bits = codec.encode_bits(1000, "qpsk", "none", None, "crc32", "none", 0, 0)
-    raw = bytearray(np.packbits(np.asarray(bits, dtype="uint8") ^ codec._scramble_mask).tobytes())
+    """Build header WIRE bits with raw information-byte overrides,
+    bypassing encode_bits' validation -- the only way to produce the
+    out-of-range values a decoder has to survive.
+
+    The overrides go in BEFORE the header's own CRC+FEC, so the crafted
+    header is internally consistent and passes the CRC. That is the
+    point: it isolates the c2_len_bytes range check from the header CRC,
+    which would otherwise reject any byte-level tampering first."""
+    info = bytearray(14)
+    info[0] = codec.PROTOCOL_VERSION
+    info[1], info[2] = 0x03, 0xE8      # payload_len_bits = 1000
+    info[3] = 1                        # qpsk
+    info[4] = (6 << 5) | 0             # crc32, fec0=none
     for idx, val in overrides.items():
-        raw[idx] = val
-    return np.unpackbits(np.frombuffer(bytes(raw), dtype=np.uint8)) ^ codec._scramble_mask
+        info[idx] = val
+    info_bits = np.unpackbits(np.frombuffer(bytes(info), dtype=np.uint8))
+    wire = np.asarray(codec.packetizer.encode(info_bits[None, :]))[0]
+    return wire ^ codec._scramble_mask
 
 
 # -- the fixed profile ------------------------------------------------
@@ -132,10 +142,11 @@ def test_a_value_at_the_cap_is_accepted_not_rejected():
 
 
 def test_protocol_version_bumped_for_the_layout_change():
-    assert HeaderCodec.PROTOCOL_VERSION == 2
+    # 2 added c2_len_bytes; 3 added the header's own CRC+FEC.
+    assert HeaderCodec.PROTOCOL_VERSION == 3
     codec = HeaderCodec()
     d = codec.decode_bits(codec.encode_bits(1000, "qpsk", "none", None))
-    assert d["protocol_version"] == 2
+    assert d["protocol_version"] == 3
 
 
 def test_user_data_shrank_to_six_bytes():
@@ -144,11 +155,15 @@ def test_user_data_shrank_to_six_bytes():
     assert len(codec.decode_bits(codec.encode_bits(1000, "qpsk", "none", None))["user_data"]) == 6
 
 
-def test_header_is_still_112_bits():
-    """The field came out of user_data, so nothing grew."""
+def test_header_information_is_still_112_bits():
+    """c2_len_bytes came out of user_data, so the INFORMATION content
+    did not grow. The wire form is larger because the header carries its
+    own CRC+FEC -- that is a separate change, see test_framing_header."""
     codec = HeaderCodec()
-    assert len(codec.encode_bits(1000, "qpsk", "none", None, "crc32", "none", 32, 320)) == 112
     assert HeaderCodec.HEADER_LEN_BITS == 112
+    assert len(codec.encode_bits(1000, "qpsk", "none", None, "crc32", "none", 32, 320)) == (
+        codec.wire_len_bits
+    )
 
 
 # -- derived sizing (step 2) ------------------------------------------

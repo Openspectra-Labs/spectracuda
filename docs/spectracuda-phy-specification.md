@@ -156,26 +156,52 @@ symbols use the normal cyclic prefix.
 
 ### 4.3 Header symbols
 
-The header is always BPSK-modulated, independent of payload modulation. The
-112 header bits are spread over one or more dedicated OFDM symbols:
+The header is always BPSK-modulated, independent of payload modulation.
+
+The 112 header information bits carry their own CRC and FEC before reaching
+the modem:
 
 ```text
-n_header_symbols = ceil(112 / n_data).
+112 information bits
+  -> CRC-16 append          -> 128 bits
+  -> rate-1/2 K=7 conv_v27  -> 268 wire bits
+  -> XOR scramble (seed 42, mask sized to the wire length)
+  -> BPSK
+  -> frequency spreading
+
+n_header_symbols = ceil(268 / n_data).
 ```
+
+At `n_data = 216` that is two header symbols, one more than the unprotected
+header needed. CRC-16 rather than CRC-8 because both land on the same two
+symbols once the convolutional code has expanded them (252 versus 268 bits),
+so the stronger check costs nothing.
 
 Real header bits are distributed across the available data positions for
 frequency diversity. Unused positions receive deterministic random filler.
-Before BPSK mapping, the 112 bits are XOR-scrambled with a deterministic
-112-bit mask generated from seed 42.
 
 Scrambling and nonconstant filler are waveform requirements, not cosmetic
 choices. An earlier mostly constant header produced a measured time-domain
 peak-to-average power ratio of approximately 181, versus approximately 5 for
 ordinary payload content, and failed specifically under real multipath.
 
-The header currently has no independent CRC or FEC. Consequently, a corrupted
-but syntactically plausible header can select the wrong payload interpretation.
-This is a known protocol limitation.
+A receiver **shall** verify the header CRC before acting on any field. A
+header that fails it **shall** be rejected rather than interpreted: a
+corrupted but syntactically plausible header would otherwise select the wrong
+payload interpretation while the receiver believed it had understood the
+frame.
+
+Measured, injecting increasing noise into the header symbols only, 40 frames
+per level: no corruption level produced a silently-wrong header. Frames either
+decoded correctly or were rejected outright. Under full-frame AWGN the header
+and the payload now succeed at the same SNR (48% at 6 dB, 93% at 8 dB, 100% at
+10 dB with an `rs_m8 + conv_v27` payload), so the header is no longer the
+weakest link in the frame.
+
+The cost is one additional header OFDM symbol per frame: 28.8 us at 10 MSps,
+which also places the payload 288 samples further from the training symbol and
+so accumulates marginally more residual CFO before payload demodulation
+begins.
 
 ### 4.4 Payload region
 

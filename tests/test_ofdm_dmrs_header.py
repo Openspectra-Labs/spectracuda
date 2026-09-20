@@ -59,10 +59,15 @@ def test_fec1_survives_alongside_a_nonzero_dmrs_period(fec1):
 def test_byte_5_bit_7_stays_reserved(interval):
     """Bit 7 is left free for a future denser interval. If the field
     ever silently widened, this catches it."""
+    # Decode back to the INFORMATION bits: the wire form now carries the
+    # header's own CRC+FEC, so the packed wire bytes are no longer the
+    # header fields and cannot be inspected directly.
     codec = HeaderCodec()
     bits = codec.encode_bits(1000, "qpsk", "conv_v27", None, "crc32", "rs_m8", interval)
-    unscrambled = np.asarray(bits, dtype="uint8") ^ codec._scramble_mask
-    byte5 = np.packbits(unscrambled).tobytes()[5]
+    info = np.asarray(
+        codec.packetizer.decode((np.asarray(bits, "uint8") ^ codec._scramble_mask)[None, :])["bits"]
+    )[0]
+    byte5 = np.packbits(info).tobytes()[5]
     assert byte5 & 0x80 == 0
 
 

@@ -205,6 +205,7 @@ import numpy as np
 from ..backend import BackendName, default_backend
 from ..block import Block
 from ..framing import HeaderCodec, Packetizer, compute_evm, compute_rssi_db
+from ..framing.header import header_wire_len_bits as _header_wire_len_bits
 from ..framing import c2 as _c2
 from ..framing import dmrs as _dmrs
 from ..framing.dmrs import DMRS_PERIOD_INTERVALS as _DMRS_PERIOD_INTERVALS
@@ -460,7 +461,11 @@ class Ofdm(Block):
 
         # Header dedicated symbol(s), matching liquid-dsp's
         # num_symbols_header = ceil(header_sym_len / M_data) exactly.
-        self.num_symbols_header = math.ceil(self.HEADER_LEN_BITS / self.grid.n_data)
+        # The header carries HEADER_LEN_BITS of INFORMATION, but what
+        # goes on subcarriers is the CRC+FEC-encoded wire form (see
+        # framing/header.py) -- size the symbol(s) against that.
+        self.header_wire_len_bits = _header_wire_len_bits()
+        self.num_symbols_header = math.ceil(self.header_wire_len_bits / self.grid.n_data)
         total_header_slots = self.num_symbols_header * self.grid.n_data
 
         # Spread the 112 real header bits evenly across the full flat
@@ -469,12 +474,12 @@ class Ofdm(Block):
         # slots -- see class docstring for the PAPR bug this (plus
         # scrambling) fixes.
         self._header_positions_flat = np.unique(
-            np.linspace(0, total_header_slots - 1, self.HEADER_LEN_BITS).round().astype(int)
+            np.linspace(0, total_header_slots - 1, self.header_wire_len_bits).round().astype(int)
         )
-        if len(self._header_positions_flat) != self.HEADER_LEN_BITS:
+        if len(self._header_positions_flat) != self.header_wire_len_bits:
             raise ValueError(
                 f"n_data={n_data} produced only {len(self._header_positions_flat)} "
-                f"distinct spread positions for the header's {self.HEADER_LEN_BITS} "
+                f"distinct spread positions for the header's {self.header_wire_len_bits} "
                 f"bits across {self.num_symbols_header} symbol(s) (rounding "
                 f"collision) -- use a larger n_data"
             )
@@ -492,7 +497,7 @@ class Ofdm(Block):
         # Fixed (not secret, not needed by the receiver -- it's discarded
         # on decode) filler for the header's leftover capacity, so it
         # isn't constant/predictable content either.
-        n_filler = total_header_slots - self.HEADER_LEN_BITS
+        n_filler = total_header_slots - self.header_wire_len_bits
         self._header_filler_bits = np.random.default_rng(2024).integers(
             0, 2, size=n_filler
         ).astype("uint8")

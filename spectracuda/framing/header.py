@@ -39,6 +39,43 @@ import numpy as np
 
 from ..fec.ldpc_tables import BASE_MATRICES as _LDPC_BASE_MATRICES
 from .c2 import C2_MAX_BYTES, check_c2_len
+
+#: The header's own CRC and FEC. The header is the weakest link in the
+#: frame: a single flipped bit can change the payload modulation, the
+#: FEC scheme, the length, the DMRS interval or the C2 length, and the
+#: receiver would then mis-decode the whole frame while believing it had
+#: understood it. Protecting 112 bits costs almost nothing, so it is
+#: protected heavily.
+#:
+#: crc16 rather than crc8: at n_data=216 both land on the same 2 header
+#: OFDM symbols once conv_v27 has expanded them (252 vs 268 bits), so
+#: the stronger check is free.
+HEADER_CRC = "crc16"
+HEADER_FEC = "conv_v27"
+
+_HEADER_PACKETIZER = None
+
+
+def header_packetizer():
+    """One lazily-built Packetizer for the header's CRC+FEC chain.
+
+    Lazy for the same reason framing/c2.py's is: construction builds a
+    native Viterbi trellis, which is not free, and this module is
+    imported long before any header is encoded."""
+    global _HEADER_PACKETIZER
+    if _HEADER_PACKETIZER is None:
+        from .packetizer import Packetizer
+
+        _HEADER_PACKETIZER = Packetizer(crc=HEADER_CRC, fec=HEADER_FEC)
+    return _HEADER_PACKETIZER
+
+
+def header_wire_len_bits() -> int:
+    """Encoded header length, i.e. how many BPSK slots the header
+    actually occupies. `HeaderCodec.HEADER_LEN_BITS` stays the
+    INFORMATION length (112); this is what the modem must carry, and
+    what `Ofdm` sizes its header symbol(s) against."""
+    return header_packetizer().encoded_length(HeaderCodec.HEADER_LEN_BITS)
 from .dmrs import DMRS_PERIOD_CODES, DMRS_PERIOD_INTERVALS
 
 MOD_SCHEME_CODES = {"bpsk": 0, "qpsk": 1, "qam16": 2, "qam64": 3, "qam256": 4}
@@ -87,12 +124,18 @@ class HeaderCodec:
     #: unchecked beyond being read back in the header dict (no
     #: compatibility logic yet -- a real protocol would reject
     #: mismatched versions).
-    PROTOCOL_VERSION = 2
+    PROTOCOL_VERSION = 3
 
     def __init__(self, scramble_seed: int = 42) -> None:
         self.scramble_seed = scramble_seed
+        self.packetizer = header_packetizer()
+        #: Encoded length -- the mask covers the bits that actually go on
+        #: subcarriers, so scrambling still does its PAPR job (see the
+        #: class docstring) now that FEC sits between the fields and the
+        #: modem.
+        self.wire_len_bits = header_wire_len_bits()
         self._scramble_mask = np.random.default_rng(scramble_seed).integers(
-            0, 2, size=self.HEADER_LEN_BITS
+            0, 2, size=self.wire_len_bits
         ).astype("uint8")
 
     def encode_bits(
@@ -175,16 +218,38 @@ class HeaderCodec:
         header_bytes[7] = c2_len_bytes & 0xFF
         header_bytes[8:14] = user_data
 
-        bits = np.unpackbits(np.frombuffer(bytes(header_bytes), dtype=np.uint8))  # 112 bits, MSB-first
-        return bits ^ self._scramble_mask
+        info_bits = np.unpackbits(np.frombuffer(bytes(header_bytes), dtype=np.uint8))  # 112, MSB-first
+        # CRC-append then FEC-encode, same order as the payload
+        # packetizer. Scrambling comes LAST so the mask covers the bits
+        # that actually reach the modem.
+        wire_bits = np.asarray(self.packetizer.encode(info_bits[None, :]))[0]
+        return wire_bits ^ self._scramble_mask
 
     def decode_bits(self, bits: np.ndarray) -> Dict[str, Any]:
         """Inverse of encode_bits. Raises ValueError if the decoded crc,
         fec0, or fec1 code isn't a known scheme (likely header
         corruption -- LIQUID_CRC_UNKNOWN=0 is deliberately unrepresented
         in CRC_SCHEME_NAMES for exactly this reason)."""
-        unscrambled = np.asarray(bits, dtype="uint8") ^ self._scramble_mask
-        header_bytes = np.packbits(unscrambled).tobytes()
+        wire_bits = np.asarray(bits, dtype="uint8")
+        if wire_bits.shape[-1] != self.wire_len_bits:
+            raise ValueError(
+                f"header needs {self.wire_len_bits} wire bits (112 information "
+                f"bits after {HEADER_CRC}+{HEADER_FEC}), got {wire_bits.shape[-1]}"
+            )
+        decoded = self.packetizer.decode((wire_bits ^ self._scramble_mask)[None, :])
+        if not bool(np.asarray(decoded["crc_valid"])[0]):
+            # The header did not survive the channel. Reject it here
+            # rather than letting a corrupted mod_scheme/fec/length/
+            # dmrs_interval/c2_len_bytes be acted on -- a wrong-but-
+            # plausible header mis-decodes the entire frame while the
+            # receiver believes it understood it. This also rejects the
+            # false-sync case (sync triggering on noise) far more
+            # reliably than the per-field code checks below could.
+            raise ValueError(
+                f"header {HEADER_CRC} check failed -- corrupted header or a "
+                f"false sync detection, not a decodable frame"
+            )
+        header_bytes = np.packbits(np.asarray(decoded["bits"])[0]).tobytes()
 
         protocol_version = header_bytes[0]
         payload_len_bits = (header_bytes[1] << 8) | header_bytes[2]
