@@ -10,13 +10,13 @@ from spectracuda.framing.header import CRC_SCHEME_CODES, FEC_SCHEME_CODES, MOD_S
 
 def test_round_trips_all_fields_with_no_ofdm_object_involved():
     codec = HeaderCodec()
-    bits = codec.encode_bits(1234, "qam16", "conv_v27", b"ABCDEFGH", "crc32")
+    bits = codec.encode_bits(1234, "qam16", "conv_v27", b"ABCDEF", "crc32")
     decoded = codec.decode_bits(bits)
     assert decoded["payload_len_bits"] == 1234
     assert decoded["mod_scheme"] == "qam16"
     assert decoded["fec0"] == "conv_v27"
     assert decoded["crc"] == "crc32"
-    assert decoded["user_data"] == b"ABCDEFGH"
+    assert decoded["user_data"] == b"ABCDEF"
     assert decoded["fec1"] == "none"
     assert decoded["protocol_version"] == HeaderCodec.PROTOCOL_VERSION
 
@@ -25,7 +25,7 @@ def test_default_user_data_is_none_bytes():
     codec = HeaderCodec()
     bits = codec.encode_bits(80, "qpsk", "none", None)
     decoded = codec.decode_bits(bits)
-    assert decoded["user_data"] == bytes(8)
+    assert decoded["user_data"] == bytes(6)
 
 
 def test_two_independent_instances_with_same_seed_agree():
@@ -68,10 +68,13 @@ def test_unknown_field_values_raise(bad_field, value):
         codec.encode_bits(80, **kwargs)
 
 
-def test_user_data_must_be_exactly_8_bytes():
+def test_user_data_must_be_exactly_6_bytes():
+    """It shrank from 8 at PROTOCOL_VERSION 2, when bytes 6-7 became
+    c2_len_bytes. Both the old 8-byte value and a short one must fail."""
     codec = HeaderCodec()
-    with pytest.raises(ValueError):
-        codec.encode_bits(80, "qpsk", "none", b"short")
+    for bad in (b"short", b"ABCDEFGH"):
+        with pytest.raises(ValueError, match="user_data"):
+            codec.encode_bits(80, "qpsk", "none", bad)
 
 
 def test_payload_len_bits_out_of_range_raises():

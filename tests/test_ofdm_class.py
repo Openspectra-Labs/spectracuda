@@ -91,14 +91,18 @@ def test_corrupted_header_can_produce_over_max_payload_symbols_and_gets_rejected
 
 
 def test_header_carries_full_liquid_dsp_style_fields():
-    """The header now matches liquid-dsp's field layout (112 bits: 8
+    """The header follows liquid-dsp's field layout (112 bits: 8
     protocol/version + 16 payload_len_bits + 8 mod_scheme + 8 crc/fec0 +
-    8 fec1 + 64 user_data), not just a trimmed-down length field. Confirm
-    every field round-trips through generate_frame -> rx_process."""
+    8 fec1 + 16 c2_len_bytes + 48 user_data), not just a trimmed-down
+    length field. Confirm every field round-trips through
+    generate_frame -> rx_process.
+
+    user_data is 6 bytes, not liquid-dsp's 8: bytes 6-7 became
+    c2_len_bytes at PROTOCOL_VERSION 2 (see framing/c2.py)."""
     ofdm = _make_ofdm(modem="qam16")
     rng = np.random.default_rng(0)
     bits = rng.integers(0, 2, size=(1, ofdm.bits_per_ofdm_symbol)).astype("uint8")
-    tx_iq = ofdm.generate_frame(bits, user_data=b"ABCDEFGH")
+    tx_iq = ofdm.generate_frame(bits, user_data=b"ABCDEF")
     result = ofdm.rx_process(tx_iq)
 
     header = result["header"]
@@ -108,7 +112,8 @@ def test_header_carries_full_liquid_dsp_style_fields():
     assert header["crc"] == "none"
     assert header["fec0"] == "none"
     assert header["fec1"] == "none"
-    assert header["user_data"] == b"ABCDEFGH"
+    assert header["user_data"] == b"ABCDEF"
+    assert header["c2_len_bytes"] == 0
     np.testing.assert_array_equal(result["bits"], bits)
 
 

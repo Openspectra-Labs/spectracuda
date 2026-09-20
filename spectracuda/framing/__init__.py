@@ -9,6 +9,7 @@ separation: `packetizer` knows nothing about `ofdmflexframegen`/
 logic inline -- see docs/todo.md #1.1 for the gap this closes ("you
 can't reuse 'decode a framed packet' logic outside Ofdm itself").
 """
+from .c2 import C2_MAX_BYTES, C2_MODEM, C2_PROFILE
 from .dmrs import (
     DMRS_PERIOD_CODES,
     DMRS_PERIOD_INTERVALS,
@@ -24,6 +25,9 @@ from .stats import compute_evm, compute_rssi_db
 
 __all__ = [
     "HeaderCodec",
+    "C2_MAX_BYTES",
+    "C2_MODEM",
+    "C2_PROFILE",
     "Packetizer",
     "compute_evm",
     "compute_rssi_db",

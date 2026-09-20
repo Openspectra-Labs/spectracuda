@@ -38,6 +38,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from ..fec.ldpc_tables import BASE_MATRICES as _LDPC_BASE_MATRICES
+from .c2 import C2_MAX_BYTES
 from .dmrs import DMRS_PERIOD_CODES, DMRS_PERIOD_INTERVALS
 
 MOD_SCHEME_CODES = {"bpsk": 0, "qpsk": 1, "qam16": 2, "qam64": 3, "qam256": 4}
@@ -71,17 +72,22 @@ class HeaderCodec:
         byte 3:      mod_scheme (payload's modulation)  8 bits
         byte 4:      crc_type(3b) + fec0(5b)            8 bits
         byte 5:      rsvd(1b) + dmrs_period(2b) + fec1(5b) 8 bits
-        bytes 6-13:  user-defined data (8 bytes)        64 bits
+        bytes 6-7:   c2_len_bytes (0 = no C2 region)    16 bits
+        bytes 8-13:  user-defined data (6 bytes)        48 bits
                                                         --------
                                                         112 bits
     """
 
     HEADER_LEN_BITS = 112
+
+    #: user_data shrank from 8 bytes to 6 at PROTOCOL_VERSION 2, when
+    #: bytes 6-7 became c2_len_bytes. The header length is unchanged.
+    USER_DATA_LEN_BYTES = 6
     #: Bumped if the wire format changes; decoded and currently
     #: unchecked beyond being read back in the header dict (no
     #: compatibility logic yet -- a real protocol would reject
     #: mismatched versions).
-    PROTOCOL_VERSION = 1
+    PROTOCOL_VERSION = 2
 
     def __init__(self, scramble_seed: int = 42) -> None:
         self.scramble_seed = scramble_seed
@@ -98,6 +104,7 @@ class HeaderCodec:
         crc0: str = "none",
         fec1: str = "none",
         dmrs_interval: int = 0,
+        c2_len_bytes: int = 0,
     ) -> np.ndarray:
         """Build the 112-bit (14-byte) header content, then scramble it
         with the fixed mask. Returns a plain-numpy uint8 bit array,
@@ -128,17 +135,29 @@ class HeaderCodec:
             raise ValueError(
                 f"crc0={crc0!r} has no header code; supported: {sorted(CRC_SCHEME_CODES)}"
             )
+        if not (0 <= c2_len_bytes <= C2_MAX_BYTES):
+            # Checked against the POLICY cap, not the field width: the
+            # field is 16 bits and could carry more, which is what lets
+            # decode reject an over-large value as corruption.
+            raise ValueError(
+                f"c2_len_bytes={c2_len_bytes} outside 0..{C2_MAX_BYTES} "
+                f"(C2_MAX_BYTES; 0 means no C2 region)"
+            )
         if dmrs_interval not in DMRS_PERIOD_INTERVALS:
             raise ValueError(
                 f"dmrs_interval={dmrs_interval!r} has no header code; supported: "
                 f"{sorted(DMRS_PERIOD_INTERVALS)} (0 = off)"
             )
         if user_data is None:
-            user_data = bytes(8)
+            user_data = bytes(self.USER_DATA_LEN_BYTES)
         else:
             user_data = bytes(user_data)
-            if len(user_data) != 8:
-                raise ValueError(f"user_data must be exactly 8 bytes, got {len(user_data)}")
+            if len(user_data) != self.USER_DATA_LEN_BYTES:
+                raise ValueError(
+                    f"user_data must be exactly {self.USER_DATA_LEN_BYTES} bytes "
+                    f"(it shrank from 8 at PROTOCOL_VERSION 2, when bytes 6-7 "
+                    f"became c2_len_bytes), got {len(user_data)}"
+                )
 
         header_bytes = bytearray(14)
         header_bytes[0] = self.PROTOCOL_VERSION
@@ -154,7 +173,9 @@ class HeaderCodec:
             ((DMRS_PERIOD_INTERVALS[dmrs_interval] & 0x03) << 5)
             | (FEC_SCHEME_CODES[fec1] & 0x1F)
         )
-        header_bytes[6:14] = user_data
+        header_bytes[6] = (c2_len_bytes >> 8) & 0xFF
+        header_bytes[7] = c2_len_bytes & 0xFF
+        header_bytes[8:14] = user_data
 
         bits = np.unpackbits(np.frombuffer(bytes(header_bytes), dtype=np.uint8))  # 112 bits, MSB-first
         return bits ^ self._scramble_mask
@@ -174,7 +195,8 @@ class HeaderCodec:
         fec0_code = header_bytes[4] & 0x1F
         fec1_code = header_bytes[5] & 0x1F
         dmrs_period_code = (header_bytes[5] >> 5) & 0x03
-        user_data = bytes(header_bytes[6:14])
+        c2_len_bytes = (header_bytes[6] << 8) | header_bytes[7]
+        user_data = bytes(header_bytes[8:14])
 
         if mod_scheme_code not in MOD_SCHEME_NAMES:
             raise ValueError(
@@ -190,6 +212,13 @@ class HeaderCodec:
             raise ValueError(
                 f"decoded FEC0 scheme code {fec0_code} is not a known "
                 f"scheme -- likely header corruption"
+            )
+        if c2_len_bytes > C2_MAX_BYTES:
+            raise ValueError(
+                f"decoded c2_len_bytes={c2_len_bytes} exceeds "
+                f"C2_MAX_BYTES={C2_MAX_BYTES} -- likely header corruption "
+                f"(the field is 16 bits so it can express values the "
+                f"profile does not permit)"
             )
         if fec1_code not in FEC_SCHEME_NAMES:
             raise ValueError(
@@ -209,5 +238,6 @@ class HeaderCodec:
             # than codes. Every 2-bit value is legal, so unlike those
             # fields this one cannot fail to resolve.
             "dmrs_interval": DMRS_PERIOD_CODES[dmrs_period_code],
+            "c2_len_bytes": int(c2_len_bytes),
             "user_data": user_data,
         }
