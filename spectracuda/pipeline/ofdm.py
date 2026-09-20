@@ -205,6 +205,7 @@ import numpy as np
 from ..backend import BackendName, default_backend
 from ..block import Block
 from ..framing import HeaderCodec, Packetizer, compute_evm, compute_rssi_db
+from ..framing import c2 as _c2
 from ..framing import dmrs as _dmrs
 from ..framing.dmrs import DMRS_PERIOD_INTERVALS as _DMRS_PERIOD_INTERVALS
 from ..framing.header import CRC_SCHEME_CODES as _CRC_SCHEME_CODES
@@ -418,6 +419,9 @@ class Ofdm(Block):
         #: -- so unlike fec/fec1 under strict_fec_check, changing this on
         #: one end alone is safe. See reconfigure_tx_scheme().
         self.dmrs_interval = dmrs_interval
+        #: Built on first use -- see the c2_packetizer/c2_modem properties.
+        self._c2_packetizer = None
+        self._c2_modem = None
         self.batch_shape_doc = (
             "generate_frame(bits): (n_batch, k * n_data * bits_per_symbol) "
             "bits -> (n_batch, n_samples) complex iq. "
@@ -572,7 +576,30 @@ class Ofdm(Block):
         raw MAX_PAYLOAD_SYMBOLS constant -- otherwise they hand
         generate_frame() a payload that only fits once DMRS is ignored,
         and it raises."""
-        return _dmrs.max_data_symbols(self.MAX_PAYLOAD_SYMBOLS, self.dmrs_interval)
+        return self.max_data_symbols_for(0)
+
+    def max_data_symbols_for(self, c2_len_bytes: int = 0) -> int:
+        """`max_data_symbols` when the frame also carries a C2 region of
+        `c2_len_bytes`. The budget now has three terms:
+
+            n_c2 + n_main + n_dmrs(n_c2 + n_main)  <=  MAX_PAYLOAD_SYMBOLS
+
+        C2 comes out of the budget exactly as DMRS does -- it costs
+        payload capacity, never extra airtime. At 320 bytes (the cap)
+        that is 15 slots gone before any payload is placed.
+
+        Countdown rather than a closed form, for the same reason as
+        framing/dmrs.py's own version: the interaction between the
+        ceiling in n_dmrs_symbols() and the C2 offset makes the obvious
+        algebra off by one, and this is computed rarely enough that
+        being obviously correct matters more."""
+        n_c2 = _c2.n_c2_symbols(c2_len_bytes, self.grid.n_data)
+        budget = self.MAX_PAYLOAD_SYMBOLS
+        for n_main in range(budget - n_c2, 0, -1):
+            total = n_c2 + n_main
+            if total + _dmrs.n_dmrs_symbols(total, self.dmrs_interval) <= budget:
+                return n_main
+        return 0
 
     def reconfigure_tx_scheme(
         self, modem: Optional[str] = None, fec: Optional[str] = None,
@@ -676,6 +703,9 @@ class Ofdm(Block):
         # segmentation must re-read.
         if dmrs_interval is not None:
             self.dmrs_interval = dmrs_interval
+        #: Built on first use -- see the c2_packetizer/c2_modem properties.
+        self._c2_packetizer = None
+        self._c2_modem = None
 
         return self.bits_per_ofdm_symbol
 
@@ -743,6 +773,7 @@ class Ofdm(Block):
         crc0: str = "none",
         fec1: str = "none",
         dmrs_interval: int = 0,
+        c2_len_bytes: int = 0,
     ) -> np.ndarray:
         """Thin wrapper delegating to self.header_codec.encode_bits() --
         the real logic (and the field-code tables it uses) now lives in
@@ -750,7 +781,8 @@ class Ofdm(Block):
         as a method here (rather than removed) so existing call sites
         keep working unchanged."""
         return self.header_codec.encode_bits(
-            payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1, dmrs_interval
+            payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1, dmrs_interval,
+            c2_len_bytes,
         )
 
     def _decode_header_bits(self, bits: np.ndarray) -> Dict[str, Any]:
@@ -768,13 +800,15 @@ class Ofdm(Block):
         crc0: str = "none",
         fec1: str = "none",
         dmrs_interval: int = 0,
+        c2_len_bytes: int = 0,
     ) -> Any:
         """(n_batch, num_symbols_header * slot_len) time-domain samples
         for the dedicated header symbol(s). Same content for every batch
         item (one frame call = one frame type/length)."""
         xp = self.xp
         content_bits = self._encode_header_bits(
-            payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1, dmrs_interval
+            payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1, dmrs_interval,
+            c2_len_bytes,
         )
 
         total_slots = self.num_symbols_header * self.grid.n_data
@@ -804,13 +838,94 @@ class Ofdm(Block):
 
     # -- public API -----------------------------------------------------------
 
-    def generate_frame(self, payload_bits: Any, user_data: Optional[bytes] = None) -> Any:
+    @property
+    def c2_packetizer(self) -> Any:
+        """The C2 region's CRC+FEC chain, built on first use.
+
+        Lazy because most frames carry no C2 region and Packetizer
+        construction is not free (native Viterbi trellis + RS GF
+        tables, ~0.15ms -- the same cost _rx_payload_codec_cache exists
+        to avoid paying per frame). Its scheme is FIXED
+        (framing/c2.py's C2_PROFILE), never resolved from the header,
+        so unlike the payload codec there is nothing to cache it
+        against."""
+        if self._c2_packetizer is None:
+            self._c2_packetizer = Packetizer(backend=self.backend, **_c2.C2_PROFILE)
+        return self._c2_packetizer
+
+    @property
+    def c2_modem(self) -> Any:
+        """Always QPSK (framing/c2.py's C2_MODEM), never self.modem."""
+        if self._c2_modem is None:
+            self._c2_modem = Modem(_c2.C2_MODEM, backend=self.backend)
+        return self._c2_modem
+
+    def _symbols_to_time(self, bits: Any, modem: Any, n_batch: int, n_symbols: int) -> Any:
+        """(n_batch, n_symbols*bits_per_symbol) coded bits -> (n_batch,
+        n_symbols, slot_len) time-domain OFDM symbols.
+
+        Factored out of generate_frame so the C2 region and the main
+        payload go through the identical modulate -> scatter -> IFFT
+        path with different modems, rather than the C2 region getting a
+        second, subtly-different copy of it. Keeps the one-batched-call
+        -per-stage property described on grouped_bits below."""
+        xp = self.xp
+        bits_per_symbol = bits.shape[-1] // n_symbols
+        flat = bits.reshape(n_batch * n_symbols, bits_per_symbol)
+        pilots = xp.tile(self.pilot_values, (n_batch * n_symbols, 1))
+        freq = self.grid.scatter(xp, pilots, modem.modulate(flat))
+        return self.mod.process(freq).reshape(n_batch, n_symbols, self.fft_size + self.cp_len)
+
+    def _encode_c2_region(self, c2_bits: Any, n_batch: int) -> Any:
+        """(n_batch, n_c2_symbols, slot_len), or None when there is no
+        C2 region. Fixed profile throughout -- see framing/c2.py."""
+        xp = self.xp
+        c2_len_bytes = c2_bits.shape[-1] // 8
+        n_c2 = _c2.n_c2_symbols(c2_len_bytes, self.grid.n_data)
+        encoded = self.c2_packetizer.encode(c2_bits)
+        per_symbol = _c2.bits_per_c2_symbol(self.grid.n_data)
+        padding = n_c2 * per_symbol - encoded.shape[-1]
+        if padding > 0:
+            # Same filler convention as the main payload: the receiver
+            # recovers the real length from c2_len_bytes, so no padding
+            # length goes on the wire.
+            filler = xp.tile(xp.asarray(self._payload_filler_bits[:padding]), (n_batch, 1))
+            encoded = xp.concatenate([encoded, filler], axis=-1)
+        return self._symbols_to_time(encoded, self.c2_modem, n_batch, n_c2)
+
+    def generate_frame(
+        self, payload_bits: Any, user_data: Optional[bytes] = None, c2_bits: Any = None
+    ) -> Any:
         xp = self.xp
         payload_bits = xp.asarray(payload_bits)
         if payload_bits.ndim == 1:
             payload_bits = payload_bits[None, :]
         n_batch = payload_bits.shape[0]
         raw_bit_count = payload_bits.shape[-1]
+
+        # C2 region (framing/c2.py): a small critical payload carried
+        # AHEAD of the main payload under a fixed QPSK+RS+Viterbi
+        # profile, so that a main-payload CRC failure does not take the
+        # control link down with it. c2_bits=None reproduces the frame
+        # exactly as it was before this existed.
+        if c2_bits is None:
+            c2_len_bytes = 0
+        else:
+            c2_bits = xp.asarray(c2_bits)
+            if c2_bits.ndim == 1:
+                c2_bits = c2_bits[None, :]
+            if c2_bits.shape[0] != n_batch:
+                raise ValueError(
+                    f"c2_bits batch {c2_bits.shape[0]} != payload batch {n_batch}"
+                )
+            if c2_bits.shape[-1] % 8:
+                raise ValueError(
+                    f"c2_bits must be a whole number of bytes, got "
+                    f"{c2_bits.shape[-1]} bits"
+                )
+            c2_len_bytes = c2_bits.shape[-1] // 8
+            _c2.check_c2_len(c2_len_bytes)
+        n_c2_symbols = _c2.n_c2_symbols(c2_len_bytes, self.grid.n_data)
 
         # CRC-append then FEC-encode, delegated to self.packetizer
         # (spectracuda/framing/packetizer.py -- extracted out of this
@@ -836,16 +951,22 @@ class Ofdm(Block):
         # max_data_symbols) -- checking n_payload_symbols by itself would
         # let a frame through here and then emit more airtime than the
         # limit exists to cap.
-        n_dmrs = _dmrs.n_dmrs_symbols(n_payload_symbols, self.dmrs_interval)
-        n_total_slots = n_payload_symbols + n_dmrs
+        # DMRS counts across BOTH regions: the channel does not care
+        # which region a symbol belongs to, so the refresh interval runs
+        # over every payload-carrying symbol (see framing/c2.py).
+        n_data_total = n_c2_symbols + n_payload_symbols
+        n_dmrs = _dmrs.n_dmrs_symbols(n_data_total, self.dmrs_interval)
+        n_total_slots = n_data_total + n_dmrs
         if n_total_slots > self.MAX_PAYLOAD_SYMBOLS:
             raise ValueError(
-                f"payload needs {n_payload_symbols} data + {n_dmrs} DMRS = "
-                f"{n_total_slots} OFDM symbols, exceeding "
+                f"frame needs {n_c2_symbols} C2 + {n_payload_symbols} data + "
+                f"{n_dmrs} DMRS = {n_total_slots} OFDM symbols, exceeding "
                 f"MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS} (a coherence-"
                 f"time limit, not a wire-format one -- see class docstring). "
-                f"At dmrs_interval={self.dmrs_interval} the data ceiling is "
-                f"{self.max_data_symbols}. Split into multiple frames."
+                f"At dmrs_interval={self.dmrs_interval} and c2_len_bytes="
+                f"{c2_len_bytes} the data ceiling is "
+                f"{self.max_data_symbols_for(c2_len_bytes)}. "
+                f"Split into multiple frames."
             )
         padding_bits = n_payload_symbols * self.bits_per_ofdm_symbol - encoded_bit_count
         if padding_bits > 0:
@@ -860,7 +981,7 @@ class Ofdm(Block):
 
         header_batch = self._build_header_symbols(
             raw_bit_count, self.modem.scheme, self.fec, user_data, n_batch, self.crc,
-            self.fec1, self.dmrs_interval,
+            self.fec1, self.dmrs_interval, c2_len_bytes,
         )
 
         # Batched across payload symbols in ONE call each, not a Python loop
@@ -877,16 +998,23 @@ class Ofdm(Block):
         # throughout (grouped_bits' own axis order), so this produces the
         # exact same per-batch-item symbol sequence the old per-symbol loop
         # did, just without the loop.
-        grouped_bits = modulated_bits.reshape(n_batch, n_payload_symbols, self.bits_per_ofdm_symbol)
-        combined_bits = grouped_bits.reshape(n_batch * n_payload_symbols, self.bits_per_ofdm_symbol)
-        pilots_combined = xp.tile(self.pilot_values, (n_batch * n_payload_symbols, 1))
-        data_symbols_all = self.modem.modulate(combined_bits)
-        freq_all = self.grid.scatter(xp, pilots_combined, data_symbols_all)
-        payload_time_all = self.mod.process(freq_all)  # (n_batch*n_payload_symbols, fft_size+cp_len)
+        main_time = self._symbols_to_time(
+            modulated_bits, self.modem, n_batch, n_payload_symbols
+        )  # (n_batch, n_payload_symbols, slot_len)
         symbol_len = self.fft_size + self.cp_len
 
+        # C2 first, then the main payload. Earliest arrival (so it can
+        # be delivered soonest) and closest to the training symbol (so
+        # it rides the freshest H[k] in the frame) -- both argue for
+        # putting the critical region first.
+        if n_c2_symbols:
+            data_time = xp.concatenate([self._encode_c2_region(c2_bits, n_batch), main_time], axis=1)
+        else:
+            data_time = main_time
+        payload_time_all = data_time.reshape(n_batch * n_data_total, symbol_len)
+
         if n_dmrs == 0:
-            payload_time = payload_time_all.reshape(n_batch, n_payload_symbols * symbol_len)
+            payload_time = payload_time_all.reshape(n_batch, n_data_total * symbol_len)
         else:
             # Interleave the payload symbols with DMRS copies of the
             # training waveform, per framing/dmrs.py's slot map -- the
@@ -900,12 +1028,12 @@ class Ofdm(Block):
             # grouped_bits), and building the frame with one fancy-index
             # write per slot KIND keeps it that way instead of paying
             # per-symbol Python overhead the batching exists to avoid.
-            slot_map = _dmrs.dmrs_slot_map(n_payload_symbols, self.dmrs_interval)
+            slot_map = _dmrs.dmrs_slot_map(n_data_total, self.dmrs_interval)
             data_at = xp.asarray(np.where(slot_map == _dmrs.DATA_SLOT)[0])
             dmrs_at = xp.asarray(np.where(slot_map == _dmrs.DMRS_SLOT)[0])
 
             slots = xp.empty((n_batch, n_total_slots, symbol_len), dtype=payload_time_all.dtype)
-            slots[:, data_at, :] = payload_time_all.reshape(n_batch, n_payload_symbols, symbol_len)
+            slots[:, data_at, :] = payload_time_all.reshape(n_batch, n_data_total, symbol_len)
             slots[:, dmrs_at, :] = train_time_one[None, None, :]
             payload_time = slots.reshape(n_batch, n_total_slots * symbol_len)
 
