@@ -32,11 +32,26 @@ from typing import Any, Dict
 C2_MODEM = "qpsk"
 
 #: CRC + two-stage FEC for the C2 region, as kwargs for `Packetizer`.
-#: fec0/fec1 ordering matches the project convention (fec0 = inner,
-#: applied first on encode; fec1 = outer, closest to the channel and
-#: decoded first) -- so Viterbi faces the channel and RS mops up after
-#: it. See framing/packetizer.py's module docstring for why round the
-#: convention goes.
+#: The chain is the conventional DVB-S concatenation:
+#:
+#:     encode:  bits -> CRC-32 -> RS(255,223) -> interleave -> conv 1/2 -> QPSK
+#:     decode:  QPSK -> Viterbi -> deinterleave -> RS -> CRC-32
+#:
+#: Viterbi faces the channel; RS cleans up its bursty residue; the
+#: interleaver sits between them with unit_bits=8 so a Viterbi burst is
+#: spread across several RS byte-symbols instead of destroying one
+#: codeword. Without it the concatenation is far weaker than its
+#: component codes suggest.
+#:
+#: **Naming warning.** This codebase calls fec0 "inner" and fec1
+#: "outer", which is INVERTED relative to standard coding terminology:
+#: conventionally the convolutional code (closest to the channel) is
+#: the inner code and RS (closest to the data) is the outer code. Here
+#: fec0=rs_m8 is labelled inner and fec1=conv_v27 outer. The encode and
+#: decode ORDER above is correct either way -- only the labels clash --
+#: but read framing/packetizer.py's module docstring before trusting
+#: either word; it records that an earlier draft of it had the ordering
+#: itself backwards.
 C2_PROFILE: Dict[str, Any] = {
     "crc": "crc32",
     "fec": "rs_m8",
@@ -53,7 +68,15 @@ C2_PROFILE: Dict[str, Any] = {
 #:
 #: At n_data=216 (432 QPSK coded bits per OFDM symbol) the cap costs 15
 #: of the 128 payload slots -- 11.7% of the budget, 432us at 10 MSps.
-#: A typical 72-byte MAVLink burst costs 5 symbols (3.9%, 144us).
+#: A typical 72-byte MAVLink burst costs 5 symbols (3.9%, 144us):
+#:
+#:     72 payload bytes -> 76 after CRC-32 -> 108 after 32 RS parity
+#:     symbols -> 2*(108*8 + 6 tail) = 1740 conv bits -> ceil(1740/432)
+#:     = 5 OFDM symbols
+#:
+#: RS is SHORTENED, not padded (see fec/reed_solomon.py). Padding the
+#: same 72 bytes out to a full 223-symbol RS information block would
+#: give 255 bytes -> 4092 conv bits -> 10 OFDM symbols, twice the cost.
 C2_MAX_BYTES = 320
 
 
