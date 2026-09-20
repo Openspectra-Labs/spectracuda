@@ -1121,7 +1121,12 @@ class Ofdm(Block):
         # payload_len_bits) already says exactly where the real data
         # ends; anything demodulated past it is discarded below.
         decoded_n_payload_symbols = math.ceil(encoded_bit_count / bits_per_symbol_payload)
-        if decoded_n_payload_symbols > self.MAX_PAYLOAD_SYMBOLS:
+        # Checked against the TOTAL slot count (data + DMRS), matching
+        # generate_frame()'s own guard -- MAX_PAYLOAD_SYMBOLS bounds
+        # airtime, and DMRS comes out of that budget rather than
+        # extending it.
+        decoded_n_total_slots = _dmrs.total_slots(decoded_n_payload_symbols, self.dmrs_interval)
+        if decoded_n_total_slots > self.MAX_PAYLOAD_SYMBOLS:
             # Defensive check, not just a coherence-time rule here: this is
             # exactly the failure mode found during development -- a bad
             # header decode returning a huge garbage symbol count that
@@ -1129,15 +1134,24 @@ class Ofdm(Block):
             # clearly right here.
             raise ValueError(
                 f"decoded header claims {decoded_n_payload_symbols} payload "
-                f"symbols, exceeding MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS} "
+                f"symbols (+ {decoded_n_total_slots - decoded_n_payload_symbols} DMRS "
+                f"= {decoded_n_total_slots} slots), exceeding "
+                f"MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS} "
                 f"-- likely header corruption, not a legitimately long frame"
             )
         if n_payload_symbols is None:
             n_payload_symbols = decoded_n_payload_symbols
-        elif n_payload_symbols > self.MAX_PAYLOAD_SYMBOLS:
+        elif _dmrs.total_slots(n_payload_symbols, self.dmrs_interval) > self.MAX_PAYLOAD_SYMBOLS:
+            # Same total-slot rule as the decoded path above and as
+            # generate_frame(): an override that only fits once DMRS is
+            # ignored is still over budget.
+            override_total = _dmrs.total_slots(n_payload_symbols, self.dmrs_interval)
             raise ValueError(
                 f"n_payload_symbols={n_payload_symbols} (explicit override) "
-                f"exceeds MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS}"
+                f"+ {override_total - n_payload_symbols} DMRS = {override_total} slots, "
+                f"exceeding MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS} "
+                f"(at dmrs_interval={self.dmrs_interval} the data ceiling is "
+                f"{self.max_data_symbols})"
             )
 
         return {
@@ -1152,6 +1166,41 @@ class Ofdm(Block):
             "n_payload_symbols": n_payload_symbols,
             "pos": pos,
         }
+
+    def _estimate_channel_from_dmrs(self, dmrs_slots: Any) -> Any:
+        """(n_batch, n_dmrs, slot_len) time-domain DMRS slots -> two
+        (n_batch, n_dmrs, k) stacks of channel estimates, at the data and
+        pilot subcarriers respectively -- one fresh H[k] per DMRS.
+
+        Deliberately the SAME demod -> known-subcarrier extract ->
+        channel_estimator sequence _decode_header_from_sync() runs on the
+        training symbol(s), because a DMRS *is* the training symbol
+        re-transmitted. No DMRS-specific estimator, no DMRS-specific
+        reference sequence: if the two ever diverged, segment 0 (from the
+        training symbol) and segments 1+ (from DMRS) would be estimates of
+        subtly different things while looking equally plausible.
+
+        Batched over (n_batch * n_dmrs) in one call each, matching how the
+        payload symbols themselves are handled below."""
+        xp = self.xp
+        n_batch, n_dmrs = dmrs_slots.shape[0], dmrs_slots.shape[1]
+        flat = dmrs_slots.reshape(n_batch * n_dmrs, self.slot_len)
+        rx_grid = self.demod.process(flat)
+        h_hat_full = self.channel_estimator.process(rx_grid[:, self._train_known_indices])
+        h_data = h_hat_full[:, self.grid.data_indices].reshape(n_batch, n_dmrs, -1)
+        h_pilots = h_hat_full[:, self.grid.pilot_indices].reshape(n_batch, n_dmrs, -1)
+        return h_data, h_pilots
+
+    def _expand_over_segments(self, h_hat_segments: Any, seg_index: Any, n_rows: int) -> Any:
+        """(n_batch, n_segments, k) -> (n_batch*n_payload_symbols, k), in
+        the batch-major/symbol-minor row order `combined_slots` uses.
+
+        `seg_index` maps each payload symbol to the segment (hence the
+        channel estimate) it belongs to. This is the per-segment
+        replacement for the old uniform
+        `xp.repeat(h_hat_data, n_payload_symbols, axis=0)`, which gave
+        every payload symbol the single training-symbol estimate."""
+        return h_hat_segments[:, seg_index, :].reshape(n_rows, h_hat_segments.shape[-1])
 
     def _decode_payload_from_header(
         self, rx_corrected: Any, pos: Any, h_hat_data: Any, payload_modem: Any,
@@ -1178,8 +1227,18 @@ class Ofdm(Block):
         # pos[b] + i*self.slot_len, computable by broadcasting (no data
         # dependency across symbols), then gathered in one fancy-indexing
         # call rather than n_payload_symbols separate _extract_slot() calls.
-        symbol_starts = pos[:, None] + xp.arange(n_payload_symbols)[None, :] * self.slot_len  # (n_batch, n_payload_symbols)
-        sample_idx = symbol_starts[:, :, None] + xp.arange(self.slot_len)[None, None, :]  # (n_batch, n_payload_symbols, slot_len)
+        #
+        # With DMRS enabled the payload region is LONGER than
+        # n_payload_symbols: the refresh symbols are interleaved among the
+        # data symbols (see framing/dmrs.py), so the region spans
+        # n_total_slots and the data symbols are only a subset of it. The
+        # slot map is rebuilt here from the same (n_payload_symbols,
+        # interval) pair the transmitter used, so the two cannot disagree
+        # about which slot is which.
+        n_dmrs = _dmrs.n_dmrs_symbols(n_payload_symbols, self.dmrs_interval)
+        n_total_slots = n_payload_symbols + n_dmrs
+        symbol_starts = pos[:, None] + xp.arange(n_total_slots)[None, :] * self.slot_len  # (n_batch, n_total_slots)
+        sample_idx = symbol_starts[:, :, None] + xp.arange(self.slot_len)[None, None, :]  # (n_batch, n_total_slots, slot_len)
         # Explicit bounds check, matching _extract_slot()'s OLD per-symbol
         # basic-slice behavior: a plain `rx[b, s:s+slot_len]` on a
         # corrupted/truncated buffer silently clips to a shorter array,
@@ -1199,15 +1258,53 @@ class Ofdm(Block):
                 f"payload extraction needs samples up to index {int(sample_idx.max())} "
                 f"but rx_corrected only has {rx_corrected.shape[1]} -- likely a "
                 f"corrupted/truncated frame (insufficient samples for "
-                f"{n_payload_symbols} payload symbols)"
+                f"{n_payload_symbols} payload + {n_dmrs} DMRS symbols)"
             )
         batch_idx = xp.arange(n_batch)[:, None, None]
-        all_slots = rx_corrected[batch_idx, sample_idx]  # (n_batch, n_payload_symbols, slot_len)
+        all_slots = rx_corrected[batch_idx, sample_idx]  # (n_batch, n_total_slots, slot_len)
 
-        combined_slots = all_slots.reshape(n_batch * n_payload_symbols, self.slot_len)
+        n_rows = n_batch * n_payload_symbols
+        if n_dmrs == 0:
+            data_slots = all_slots
+            h_hat_combined = xp.repeat(h_hat_data, n_payload_symbols, axis=0)  # batch-major/symbol-minor, matches combined_slots' own row order
+            h_hat_pilots_combined = (
+                None if h_hat_pilots is None else xp.repeat(h_hat_pilots, n_payload_symbols, axis=0)
+            )
+        else:
+            # Split the region, then re-estimate H[k] at each DMRS and give
+            # every payload symbol the estimate from the most recent
+            # reference symbol BEFORE it: segment 0 keeps the training
+            # symbol's estimate (identical to the DMRS-off behavior),
+            # segment k uses the k-th DMRS.
+            #
+            # This is the line the whole feature turns on. Before DMRS,
+            # h_hat_combined was one estimate repeated over every payload
+            # symbol, so a long frame equalized its last symbol against a
+            # channel measured milliseconds earlier.
+            slot_map = _dmrs.dmrs_slot_map(n_payload_symbols, self.dmrs_interval)
+            data_at = xp.asarray(np.where(slot_map == _dmrs.DATA_SLOT)[0])
+            dmrs_at = xp.asarray(np.where(slot_map == _dmrs.DMRS_SLOT)[0])
+
+            dmrs_h_data, dmrs_h_pilots = self._estimate_channel_from_dmrs(all_slots[:, dmrs_at, :])
+            # Host-side: n_segments is tiny (<= 8) and this is pure
+            # bookkeeping, so it is built once with numpy and moved over as
+            # a single index array rather than repeated on the device.
+            seg_lengths = _dmrs.segment_lengths(n_payload_symbols, self.dmrs_interval)
+            seg_index = xp.asarray(np.repeat(np.arange(len(seg_lengths)), seg_lengths))
+
+            data_slots = all_slots[:, data_at, :]
+            h_hat_combined = self._expand_over_segments(
+                xp.concatenate([h_hat_data[:, None, :], dmrs_h_data], axis=1), seg_index, n_rows
+            )
+            h_hat_pilots_combined = (
+                None if h_hat_pilots is None else self._expand_over_segments(
+                    xp.concatenate([h_hat_pilots[:, None, :], dmrs_h_pilots], axis=1), seg_index, n_rows
+                )
+            )
+
+        combined_slots = data_slots.reshape(n_rows, self.slot_len)
         combined_rx_grid = self.demod.process(combined_slots)
         combined_rx_data = self.grid.extract_data(xp, combined_rx_grid)
-        h_hat_combined = xp.repeat(h_hat_data, n_payload_symbols, axis=0)  # batch-major/symbol-minor, matches combined_slots' own row order
         equalized_combined = self.equalizer.process(combined_rx_data, channel_est=h_hat_combined)
 
         # Per-symbol common-phase-error (CPE) correction using the payload's
@@ -1241,8 +1338,12 @@ class Ofdm(Block):
         # would fold channel response into what's supposed to be a pure
         # drift measurement.
         pilots_rx_combined = self.grid.extract_pilots(xp, combined_rx_grid)  # (n_batch*n_payload_symbols, n_pilot)
-        if h_hat_pilots is not None:
-            h_hat_pilots_combined = xp.repeat(h_hat_pilots, n_payload_symbols, axis=0)
+        if h_hat_pilots_combined is not None:
+            # Expanded alongside h_hat_combined above, so the pilots are
+            # measured against the same per-segment estimate the data is --
+            # a DMRS refresh that updated only the data subcarriers would
+            # make this CPE measurement disagree with the equalization it
+            # is supposed to be correcting.
             equalized_pilots = self.equalizer.process(pilots_rx_combined, channel_est=h_hat_pilots_combined)
         else:
             # Backward-compat fallback for any direct caller still on the old
