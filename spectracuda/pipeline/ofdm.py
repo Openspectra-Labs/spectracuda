@@ -205,6 +205,8 @@ import numpy as np
 from ..backend import BackendName, default_backend
 from ..block import Block
 from ..framing import HeaderCodec, Packetizer, compute_evm, compute_rssi_db
+from ..framing import dmrs as _dmrs
+from ..framing.dmrs import DMRS_PERIOD_INTERVALS as _DMRS_PERIOD_INTERVALS
 from ..framing.header import CRC_SCHEME_CODES as _CRC_SCHEME_CODES
 from ..framing.header import FEC_SCHEME_CODES as _FEC_SCHEME_CODES
 from ..modem import Modem
@@ -288,6 +290,7 @@ class Ofdm(Block):
         channel_estimator: Any = "ls",
         equalizer: Any = "mmse",
         n_training_symbols: int = 1,
+        dmrs_interval: int = 0,
         pilot_values: Optional[Any] = None,
         preamble_seed: int = 123,
         training_seed: int = 999,
@@ -312,6 +315,17 @@ class Ofdm(Block):
             raise ValueError(f"crc={crc!r}; expected one of {sorted(_CRC_SCHEME_CODES)}")
         if n_training_symbols < 1:
             raise ValueError("n_training_symbols must be >= 1")
+        if dmrs_interval not in _DMRS_PERIOD_INTERVALS:
+            # Restricted to the four wire-representable values HERE rather
+            # than in framing/dmrs.py, whose arithmetic is deliberately
+            # general (small intervals are useful in its own tests). This
+            # is the boundary where a value has to survive the header's
+            # 2-bit dmrs_period field, so it's where the check belongs.
+            raise ValueError(
+                f"dmrs_interval={dmrs_interval!r}; expected one of "
+                f"{sorted(_DMRS_PERIOD_INTERVALS)} (0 = off). The interval "
+                f"counts DATA symbols -- see spectracuda/framing/dmrs.py"
+            )
         if iq_dtype not in ("float16", "float32"):
             raise ValueError(
                 f"iq_dtype={iq_dtype!r}; expected 'float16' or 'float32' "
@@ -398,6 +412,12 @@ class Ofdm(Block):
         # longer needlessly on the common no-change path.
         self._rx_payload_codec_cache = None  # (key_tuple, payload_modem, payload_packetizer) or None
         self.n_training_symbols = n_training_symbols
+        #: DMRS refresh interval, in DATA symbols (0 = off). Transmit-side
+        #: setting only: rx_process()/rx_streaming() resolve it from the
+        #: DECODED header, never from self, exactly as they do mod_scheme
+        #: -- so unlike fec/fec1 under strict_fec_check, changing this on
+        #: one end alone is safe. See reconfigure_tx_scheme().
+        self.dmrs_interval = dmrs_interval
         self.batch_shape_doc = (
             "generate_frame(bits): (n_batch, k * n_data * bits_per_symbol) "
             "bits -> (n_batch, n_samples) complex iq. "
@@ -536,6 +556,23 @@ class Ofdm(Block):
             cp_len=cp_len,
             backend=resolved_backend,
         )
+
+    @property
+    def max_data_symbols(self) -> int:
+        """Largest payload-DATA-symbol count this object can transmit,
+        i.e. the largest n with `n + n_dmrs(n) <= MAX_PAYLOAD_SYMBOLS`.
+
+        MAX_PAYLOAD_SYMBOLS bounds the TOTAL payload-region slot count
+        (data + DMRS), never data alone -- DMRS comes out of the budget,
+        it does not buy extra airtime. So this is 128 with DMRS off and
+        drops to 127/125/121 at dmrs_interval 64/32/16.
+
+        Callers doing their own segmentation math (`Mac.max_segment_bits`
+        via `mac/capacity.py`) must size against THIS, not against the
+        raw MAX_PAYLOAD_SYMBOLS constant -- otherwise they hand
+        generate_frame() a payload that only fits once DMRS is ignored,
+        and it raises."""
+        return _dmrs.max_data_symbols(self.MAX_PAYLOAD_SYMBOLS, self.dmrs_interval)
 
     def reconfigure_tx_scheme(
         self, modem: Optional[str] = None, fec: Optional[str] = None, fec1: Optional[str] = None
@@ -772,12 +809,20 @@ class Ofdm(Block):
         # of the demodulated bits in the last symbol are real vs filler,
         # without spectracuda needing to say so on the wire.
         n_payload_symbols = math.ceil(encoded_bit_count / self.bits_per_ofdm_symbol)
-        if n_payload_symbols > self.MAX_PAYLOAD_SYMBOLS:
+        # MAX_PAYLOAD_SYMBOLS bounds data + DMRS, not data alone (see
+        # max_data_symbols) -- checking n_payload_symbols by itself would
+        # let a frame through here and then emit more airtime than the
+        # limit exists to cap.
+        n_dmrs = _dmrs.n_dmrs_symbols(n_payload_symbols, self.dmrs_interval)
+        n_total_slots = n_payload_symbols + n_dmrs
+        if n_total_slots > self.MAX_PAYLOAD_SYMBOLS:
             raise ValueError(
-                f"payload needs {n_payload_symbols} OFDM symbols, exceeding "
+                f"payload needs {n_payload_symbols} data + {n_dmrs} DMRS = "
+                f"{n_total_slots} OFDM symbols, exceeding "
                 f"MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS} (a coherence-"
                 f"time limit, not a wire-format one -- see class docstring). "
-                f"Split into multiple frames."
+                f"At dmrs_interval={self.dmrs_interval} the data ceiling is "
+                f"{self.max_data_symbols}. Split into multiple frames."
             )
         padding_bits = n_payload_symbols * self.bits_per_ofdm_symbol - encoded_bit_count
         if padding_bits > 0:
@@ -815,7 +860,30 @@ class Ofdm(Block):
         freq_all = self.grid.scatter(xp, pilots_combined, data_symbols_all)
         payload_time_all = self.mod.process(freq_all)  # (n_batch*n_payload_symbols, fft_size+cp_len)
         symbol_len = self.fft_size + self.cp_len
-        payload_time = payload_time_all.reshape(n_batch, n_payload_symbols * symbol_len)
+
+        if n_dmrs == 0:
+            payload_time = payload_time_all.reshape(n_batch, n_payload_symbols * symbol_len)
+        else:
+            # Interleave the payload symbols with DMRS copies of the
+            # training waveform, per framing/dmrs.py's slot map -- the
+            # SAME map the receiver rebuilds from the decoded header, so
+            # the two cannot disagree about which slot is which.
+            #
+            # Scatter-into-preallocated rather than a Python-level
+            # concatenate loop: the payload symbols are already computed
+            # as one batched (n_batch*n_payload_symbols, symbol_len)
+            # block above (deliberately -- see the comment on
+            # grouped_bits), and building the frame with one fancy-index
+            # write per slot KIND keeps it that way instead of paying
+            # per-symbol Python overhead the batching exists to avoid.
+            slot_map = _dmrs.dmrs_slot_map(n_payload_symbols, self.dmrs_interval)
+            data_at = xp.asarray(np.where(slot_map == _dmrs.DATA_SLOT)[0])
+            dmrs_at = xp.asarray(np.where(slot_map == _dmrs.DMRS_SLOT)[0])
+
+            slots = xp.empty((n_batch, n_total_slots, symbol_len), dtype=payload_time_all.dtype)
+            slots[:, data_at, :] = payload_time_all.reshape(n_batch, n_payload_symbols, symbol_len)
+            slots[:, dmrs_at, :] = train_time_one[None, None, :]
+            payload_time = slots.reshape(n_batch, n_total_slots * symbol_len)
 
         frame = xp.concatenate([preamble_batch, train_batch, header_batch, payload_time], axis=-1)
         return self._quantize(frame)  # simulate the DAC's resolution -- see class docstring
