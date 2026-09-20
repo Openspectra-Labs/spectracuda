@@ -16,7 +16,7 @@ from .pdu import HEADER_LEN_BITS
 def compute_max_segment_bits(ofdm: Any, has_mac_header: bool) -> int:
     """Largest raw PDU size (bits, multiple of 8 -- Packetizer's CRC
     stage requires byte alignment) whose Packetizer-encoded length still
-    fits within Ofdm.MAX_PAYLOAD_SYMBOLS worth of OFDM symbols, minus
+    fits within Ofdm.max_data_symbols worth of OFDM symbols, minus
     room for the MAC header itself (UM/AM only -- TM has none).
 
     Binary-searches against ofdm.packetizer.encoded_length() -- the
@@ -56,7 +56,16 @@ def compute_max_segment_bits(ofdm: Any, has_mac_header: bool) -> int:
     shortening-capable scheme (rs_m8, every ldpc_*: True) from one that
     genuinely still needs the whole-block search (currently none --
     kept as a general fallback, not scheme-specific dead code) here."""
-    limit = ofdm.MAX_PAYLOAD_SYMBOLS * ofdm.bits_per_ofdm_symbol
+    # ofdm.max_data_symbols, NOT MAX_PAYLOAD_SYMBOLS: that constant
+    # bounds the TOTAL payload-region slot count (data + DMRS), and with
+    # DMRS enabled only 127/125/121 of those 128 slots carry data (at
+    # dmrs_interval 64/32/16). Sizing against the raw constant would
+    # segment to 128 data symbols, generate_frame() would then add the
+    # DMRS on top, and its total-slot guard would raise -- at maximum
+    # segment size, on real traffic. Note bits_per_ofdm_symbol does NOT
+    # move with the interval, so reconfigure_tx_scheme()'s return value
+    # is not enough to notice this on its own.
+    limit = ofdm.max_data_symbols * ofdm.bits_per_ofdm_symbol
     packetizer = ofdm.packetizer
     fec0 = packetizer.fec_codec
     needs_whole_block_search = (

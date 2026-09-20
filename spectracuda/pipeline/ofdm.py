@@ -1670,7 +1670,17 @@ class Ofdm(Block):
             # here, since it's used below for buffer-length comparisons
             # and slicing, neither of which accept an array index.
             pos_scalar = int(np.asarray(self._to_host(h["pos"]))[0])
-            frame_end = pos_scalar + h["n_payload_symbols"] * self.slot_len
+            # TOTAL slots, not payload symbols: with DMRS the refresh
+            # symbols are interleaved among the data symbols, so the
+            # frame occupies more of the buffer than n_payload_symbols
+            # accounts for. Using the payload count here would declare
+            # the frame complete early, hand _decode_payload_from_header
+            # a truncated buffer, and evict the tail of every
+            # DMRS-bearing frame. This is the only frame-length
+            # computation outside _decode_payload_from_header.
+            frame_end = pos_scalar + _dmrs.total_slots(
+                h["n_payload_symbols"], h["dmrs_interval"]
+            ) * self.slot_len
             if self._stream_buffer.shape[-1] < frame_end:
                 return None  # keep accumulating
 
@@ -1687,7 +1697,7 @@ class Ofdm(Block):
                 p = self._decode_payload_from_header(
                     rx_corrected_full, h["pos"], h["h_hat_data"], h["payload_modem"],
                     h["payload_packetizer"], h["encoded_bit_count"], h["n_payload_symbols"],
-                    h["h_hat_pilots"],
+                    h["h_hat_pilots"], h["dmrs_interval"],
                 )
             except (ValueError, NotImplementedError):
                 self.stream_debug_counts["payload_fail"] += 1  # TEMP diagnostic, see reset_stream()
