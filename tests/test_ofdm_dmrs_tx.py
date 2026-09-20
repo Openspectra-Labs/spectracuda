@@ -98,12 +98,20 @@ def test_frame_grows_by_exactly_the_dmrs_slots(interval):
 
 def test_short_frame_carries_no_dmrs_at_the_diagonal_interval():
     """A ~1ms TXOP at 10 MSps is ~31 payload symbols; at interval 32 it
-    must be byte-identical to the DMRS-off frame."""
+    gets no DMRS at all, so the frame is the same length and its payload
+    region is byte-identical to the DMRS-off frame.
+
+    The HEADER legitimately differs -- it carries the interval, so a
+    receiver knows to expect none (step 4) -- which is why this compares
+    the payload region rather than the whole frame."""
     bits = payload_bits(6_000)
-    off = make(0).generate_frame(bits)
-    on = make(32).generate_frame(bits)
-    assert n_data_symbols_for(make(32), bits) <= 32
-    np.testing.assert_array_equal(np.asarray(on), np.asarray(off))
+    on_ofdm = make(32)
+    off = np.asarray(make(0).generate_frame(bits))
+    on = np.asarray(on_ofdm.generate_frame(bits))
+    assert n_data_symbols_for(on_ofdm, bits) <= 32
+    assert on.shape == off.shape
+    base = overhead_samples(on_ofdm)
+    np.testing.assert_array_equal(on[0, base:], off[0, base:])
 
 
 # -- slot contents ----------------------------------------------------
@@ -146,12 +154,30 @@ def test_payload_symbols_are_repositioned_not_altered(interval):
 
 
 @pytest.mark.parametrize("interval", [16, 32, 64])
-def test_preamble_training_and_header_are_untouched(interval):
+def test_preamble_and_training_are_untouched(interval):
+    """DMRS changes nothing before the header: detection, timing, CFO
+    and the initial H[k] estimate are all unaffected."""
+    ofdm = make(interval)
     bits = payload_bits(40_000)
     off = np.asarray(make(0).generate_frame(bits))
-    on = np.asarray(make(interval).generate_frame(bits))
-    base = overhead_samples(make(interval))
-    np.testing.assert_array_equal(on[0, :base], off[0, :base])
+    on = np.asarray(ofdm.generate_frame(bits))
+    pre_header = FFT + SLOT * ofdm.n_training_symbols
+    np.testing.assert_array_equal(on[0, :pre_header], off[0, :pre_header])
+
+
+@pytest.mark.parametrize("interval", [16, 32, 64])
+def test_header_symbol_does_differ(interval):
+    """The complement of the above: the header MUST change, because it
+    carries the 2-bit dmrs_period the receiver resolves the layout from
+    (step 4). If it were identical, the interval would not be on the
+    wire at all."""
+    ofdm = make(interval)
+    bits = payload_bits(40_000)
+    off = np.asarray(make(0).generate_frame(bits))
+    on = np.asarray(ofdm.generate_frame(bits))
+    pre_header = FFT + SLOT * ofdm.n_training_symbols
+    base = overhead_samples(ofdm)
+    assert not np.array_equal(on[0, pre_header:base], off[0, pre_header:base])
 
 
 # -- the 128 total-slot guard -----------------------------------------

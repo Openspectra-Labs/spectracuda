@@ -575,7 +575,8 @@ class Ofdm(Block):
         return _dmrs.max_data_symbols(self.MAX_PAYLOAD_SYMBOLS, self.dmrs_interval)
 
     def reconfigure_tx_scheme(
-        self, modem: Optional[str] = None, fec: Optional[str] = None, fec1: Optional[str] = None
+        self, modem: Optional[str] = None, fec: Optional[str] = None,
+        fec1: Optional[str] = None, dmrs_interval: Optional[int] = None,
     ) -> int:
         """Change this object's OWN transmit-side modem/fec/fec1 choice
         (what `generate_frame()` uses next) WITHOUT rebuilding the rest
@@ -633,6 +634,11 @@ class Ofdm(Block):
         callers with their own segmentation math derived from it (e.g.
         `Mac.max_segment_bits`, via `mac/capacity.py`) need to know
         whether/how it moved."""
+        if dmrs_interval is not None and dmrs_interval not in _DMRS_PERIOD_INTERVALS:
+            raise ValueError(
+                f"dmrs_interval={dmrs_interval!r}; expected one of "
+                f"{sorted(_DMRS_PERIOD_INTERVALS)} (0 = off)"
+            )
         if fec is not None and fec != "none" and fec not in _FEC_SCHEME_CODES:
             raise ValueError(f"fec={fec!r}; expected one of {sorted(_FEC_SCHEME_CODES)}")
         if fec1 is not None and fec1 != "none" and fec1 not in _FEC_SCHEME_CODES:
@@ -659,6 +665,17 @@ class Ofdm(Block):
             self.fec1 = new_fec1
             self.fec_codec = self.packetizer.fec_codec
             self.crc_codec = self.packetizer.crc_codec
+
+        # Scheme-derived only -- no grid, codec, trellis or GF table to
+        # rebuild, so unlike a fec change this costs nothing to apply.
+        # Needs no matching call on the receiver either: rx_process()
+        # reads the interval out of the decoded header, the same way it
+        # reads mod_scheme, so this is safe to change on one end alone
+        # (contrast fec/fec1 under strict_fec_check above). Note it moves
+        # self.max_data_symbols, which callers doing their own
+        # segmentation must re-read.
+        if dmrs_interval is not None:
+            self.dmrs_interval = dmrs_interval
 
         return self.bits_per_ofdm_symbol
 
@@ -725,13 +742,16 @@ class Ofdm(Block):
         user_data: Optional[bytes],
         crc0: str = "none",
         fec1: str = "none",
+        dmrs_interval: int = 0,
     ) -> np.ndarray:
         """Thin wrapper delegating to self.header_codec.encode_bits() --
         the real logic (and the field-code tables it uses) now lives in
         spectracuda/framing/header.py (see docs/todo.md #1.1/#1.2). Kept
         as a method here (rather than removed) so existing call sites
         keep working unchanged."""
-        return self.header_codec.encode_bits(payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1)
+        return self.header_codec.encode_bits(
+            payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1, dmrs_interval
+        )
 
     def _decode_header_bits(self, bits: np.ndarray) -> Dict[str, Any]:
         """Thin wrapper delegating to self.header_codec.decode_bits() --
@@ -747,12 +767,15 @@ class Ofdm(Block):
         n_batch: int,
         crc0: str = "none",
         fec1: str = "none",
+        dmrs_interval: int = 0,
     ) -> Any:
         """(n_batch, num_symbols_header * slot_len) time-domain samples
         for the dedicated header symbol(s). Same content for every batch
         item (one frame call = one frame type/length)."""
         xp = self.xp
-        content_bits = self._encode_header_bits(payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1)
+        content_bits = self._encode_header_bits(
+            payload_len_bits, mod_scheme, fec0, user_data, crc0, fec1, dmrs_interval
+        )
 
         total_slots = self.num_symbols_header * self.grid.n_data
         flat_bits = np.empty(total_slots, dtype="uint8")
@@ -836,7 +859,8 @@ class Ofdm(Block):
         train_batch = xp.tile(train_time_one, (n_batch, self.n_training_symbols))
 
         header_batch = self._build_header_symbols(
-            raw_bit_count, self.modem.scheme, self.fec, user_data, n_batch, self.crc, self.fec1
+            raw_bit_count, self.modem.scheme, self.fec, user_data, n_batch, self.crc,
+            self.fec1, self.dmrs_interval,
         )
 
         # Batched across payload symbols in ONE call each, not a Python loop
@@ -967,7 +991,7 @@ class Ofdm(Block):
         p = self._decode_payload_from_header(
             h["rx_corrected"], h["pos"], h["h_hat_data"], h["payload_modem"],
             h["payload_packetizer"], h["encoded_bit_count"], h["n_payload_symbols"],
-            h["h_hat_pilots"],
+            h["h_hat_pilots"], h["dmrs_interval"],
         )
 
         return {
@@ -1035,6 +1059,11 @@ class Ofdm(Block):
             header_equalized = self.equalizer.process(header_rx_data, channel_est=h_hat_data)
             header_bits_chunks.append(self.header_modem.demodulate(header_equalized))
         header_fields = self._decode_header_symbols(xp.concatenate(header_bits_chunks, axis=-1))
+        # Resolved from the DECODED header, never from self -- the same
+        # rule mod_scheme/crc/fec0/fec1 already follow, and the reason a
+        # receiver never has to be told the transmitter's dmrs_interval.
+        # self.dmrs_interval is transmit-side only.
+        rx_dmrs_interval = header_fields["dmrs_interval"]
 
         # strict_fec_check (see __init__'s own comment): reject any
         # decoded fec0/fec1 this receiver wasn't itself configured for,
@@ -1125,7 +1154,7 @@ class Ofdm(Block):
         # generate_frame()'s own guard -- MAX_PAYLOAD_SYMBOLS bounds
         # airtime, and DMRS comes out of that budget rather than
         # extending it.
-        decoded_n_total_slots = _dmrs.total_slots(decoded_n_payload_symbols, self.dmrs_interval)
+        decoded_n_total_slots = _dmrs.total_slots(decoded_n_payload_symbols, rx_dmrs_interval)
         if decoded_n_total_slots > self.MAX_PAYLOAD_SYMBOLS:
             # Defensive check, not just a coherence-time rule here: this is
             # exactly the failure mode found during development -- a bad
@@ -1141,17 +1170,17 @@ class Ofdm(Block):
             )
         if n_payload_symbols is None:
             n_payload_symbols = decoded_n_payload_symbols
-        elif _dmrs.total_slots(n_payload_symbols, self.dmrs_interval) > self.MAX_PAYLOAD_SYMBOLS:
+        elif _dmrs.total_slots(n_payload_symbols, rx_dmrs_interval) > self.MAX_PAYLOAD_SYMBOLS:
             # Same total-slot rule as the decoded path above and as
             # generate_frame(): an override that only fits once DMRS is
             # ignored is still over budget.
-            override_total = _dmrs.total_slots(n_payload_symbols, self.dmrs_interval)
+            override_total = _dmrs.total_slots(n_payload_symbols, rx_dmrs_interval)
             raise ValueError(
                 f"n_payload_symbols={n_payload_symbols} (explicit override) "
                 f"+ {override_total - n_payload_symbols} DMRS = {override_total} slots, "
                 f"exceeding MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS} "
-                f"(at dmrs_interval={self.dmrs_interval} the data ceiling is "
-                f"{self.max_data_symbols})"
+                f"(at the header's dmrs_interval={rx_dmrs_interval} the data "
+                f"ceiling is {_dmrs.max_data_symbols(self.MAX_PAYLOAD_SYMBOLS, rx_dmrs_interval)})"
             )
 
         return {
@@ -1164,6 +1193,7 @@ class Ofdm(Block):
             "payload_packetizer": payload_packetizer,
             "encoded_bit_count": encoded_bit_count,
             "n_payload_symbols": n_payload_symbols,
+            "dmrs_interval": rx_dmrs_interval,
             "pos": pos,
         }
 
@@ -1205,7 +1235,7 @@ class Ofdm(Block):
     def _decode_payload_from_header(
         self, rx_corrected: Any, pos: Any, h_hat_data: Any, payload_modem: Any,
         payload_packetizer: Any, encoded_bit_count: int, n_payload_symbols: int,
-        h_hat_pilots: Any = None,
+        h_hat_pilots: Any = None, dmrs_interval: int = 0,
     ) -> Dict[str, Any]:
         """Payload extraction through FEC-decode/CRC-check/EVM -- the
         other half of rx_process(), extracted for the same reuse reason
@@ -1235,7 +1265,7 @@ class Ofdm(Block):
         # slot map is rebuilt here from the same (n_payload_symbols,
         # interval) pair the transmitter used, so the two cannot disagree
         # about which slot is which.
-        n_dmrs = _dmrs.n_dmrs_symbols(n_payload_symbols, self.dmrs_interval)
+        n_dmrs = _dmrs.n_dmrs_symbols(n_payload_symbols, dmrs_interval)
         n_total_slots = n_payload_symbols + n_dmrs
         symbol_starts = pos[:, None] + xp.arange(n_total_slots)[None, :] * self.slot_len  # (n_batch, n_total_slots)
         sample_idx = symbol_starts[:, :, None] + xp.arange(self.slot_len)[None, None, :]  # (n_batch, n_total_slots, slot_len)
@@ -1281,7 +1311,7 @@ class Ofdm(Block):
             # h_hat_combined was one estimate repeated over every payload
             # symbol, so a long frame equalized its last symbol against a
             # channel measured milliseconds earlier.
-            slot_map = _dmrs.dmrs_slot_map(n_payload_symbols, self.dmrs_interval)
+            slot_map = _dmrs.dmrs_slot_map(n_payload_symbols, dmrs_interval)
             data_at = xp.asarray(np.where(slot_map == _dmrs.DATA_SLOT)[0])
             dmrs_at = xp.asarray(np.where(slot_map == _dmrs.DMRS_SLOT)[0])
 
@@ -1289,7 +1319,7 @@ class Ofdm(Block):
             # Host-side: n_segments is tiny (<= 8) and this is pure
             # bookkeeping, so it is built once with numpy and moved over as
             # a single index array rather than repeated on the device.
-            seg_lengths = _dmrs.segment_lengths(n_payload_symbols, self.dmrs_interval)
+            seg_lengths = _dmrs.segment_lengths(n_payload_symbols, dmrs_interval)
             seg_index = xp.asarray(np.repeat(np.arange(len(seg_lengths)), seg_lengths))
 
             data_slots = all_slots[:, data_at, :]

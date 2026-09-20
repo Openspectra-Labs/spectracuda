@@ -38,6 +38,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from ..fec.ldpc_tables import BASE_MATRICES as _LDPC_BASE_MATRICES
+from .dmrs import DMRS_PERIOD_CODES, DMRS_PERIOD_INTERVALS
 
 MOD_SCHEME_CODES = {"bpsk": 0, "qpsk": 1, "qam16": 2, "qam64": 3, "qam256": 4}
 MOD_SCHEME_NAMES = {v: k for k, v in MOD_SCHEME_CODES.items()}
@@ -69,7 +70,7 @@ class HeaderCodec:
         bytes 1-2:   payload length, in BITS           16 bits
         byte 3:      mod_scheme (payload's modulation)  8 bits
         byte 4:      crc_type(3b) + fec0(5b)            8 bits
-        byte 5:      fec1                                8 bits
+        byte 5:      rsvd(1b) + dmrs_period(2b) + fec1(5b) 8 bits
         bytes 6-13:  user-defined data (8 bytes)        64 bits
                                                         --------
                                                         112 bits
@@ -96,6 +97,7 @@ class HeaderCodec:
         user_data: Optional[bytes],
         crc0: str = "none",
         fec1: str = "none",
+        dmrs_interval: int = 0,
     ) -> np.ndarray:
         """Build the 112-bit (14-byte) header content, then scramble it
         with the fixed mask. Returns a plain-numpy uint8 bit array,
@@ -126,6 +128,11 @@ class HeaderCodec:
             raise ValueError(
                 f"crc0={crc0!r} has no header code; supported: {sorted(CRC_SCHEME_CODES)}"
             )
+        if dmrs_interval not in DMRS_PERIOD_INTERVALS:
+            raise ValueError(
+                f"dmrs_interval={dmrs_interval!r} has no header code; supported: "
+                f"{sorted(DMRS_PERIOD_INTERVALS)} (0 = off)"
+            )
         if user_data is None:
             user_data = bytes(8)
         else:
@@ -139,7 +146,14 @@ class HeaderCodec:
         header_bytes[2] = payload_len_bits & 0xFF
         header_bytes[3] = MOD_SCHEME_CODES[mod_scheme]
         header_bytes[4] = ((CRC_SCHEME_CODES[crc0] & 0x07) << 5) | (FEC_SCHEME_CODES[fec0] & 0x1F)
-        header_bytes[5] = FEC_SCHEME_CODES[fec1] & 0x1F
+        # byte 5's top three bits used to be unconditionally zero (fec1 is
+        # a 5-bit field), and decode_bits() already masked them off -- so
+        # putting dmrs_period there costs no header space and an older
+        # decoder reading this byte still recovers fec1 correctly.
+        header_bytes[5] = (
+            ((DMRS_PERIOD_INTERVALS[dmrs_interval] & 0x03) << 5)
+            | (FEC_SCHEME_CODES[fec1] & 0x1F)
+        )
         header_bytes[6:14] = user_data
 
         bits = np.unpackbits(np.frombuffer(bytes(header_bytes), dtype=np.uint8))  # 112 bits, MSB-first
@@ -159,6 +173,7 @@ class HeaderCodec:
         crc_code = (header_bytes[4] >> 5) & 0x07
         fec0_code = header_bytes[4] & 0x1F
         fec1_code = header_bytes[5] & 0x1F
+        dmrs_period_code = (header_bytes[5] >> 5) & 0x03
         user_data = bytes(header_bytes[6:14])
 
         if mod_scheme_code not in MOD_SCHEME_NAMES:
@@ -189,5 +204,10 @@ class HeaderCodec:
             "crc": CRC_SCHEME_NAMES[crc_code],
             "fec0": FEC_SCHEME_NAMES[fec0_code],
             "fec1": FEC_SCHEME_NAMES[fec1_code],
+            # Returned as the INTERVAL (data symbols), not the wire code --
+            # matching how mod_scheme/crc/fec come back as names rather
+            # than codes. Every 2-bit value is legal, so unlike those
+            # fields this one cannot fail to resolve.
+            "dmrs_interval": DMRS_PERIOD_CODES[dmrs_period_code],
             "user_data": user_data,
         }
