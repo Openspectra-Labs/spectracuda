@@ -1050,6 +1050,14 @@ def test_channel_estimator_mmse_under_real_multipath_and_awgn_channel():
 _STABLE_RESULT_KEYS = {
     "frame_found", "start_index", "sync_metric", "rssi_db", "cfo_estimate",
     "channel_estimate", "header", "n_payload_symbols", "bits", "crc_valid", "evm",
+    # C2 region (framing/c2.py): always present, None when the frame
+    # carries no C2 region.
+    "c2_bits", "c2_crc_valid", "c2_evm",
+    # symbol_diagnostics predates the C2 work -- it was added to
+    # rx_process() without being added here, so both key-set tests were
+    # already failing on this branch. Listed now because leaving the
+    # set half-correct while updating it for C2 would be worse.
+    "symbol_diagnostics",
 }
 
 

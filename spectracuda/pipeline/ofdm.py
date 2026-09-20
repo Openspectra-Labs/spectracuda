@@ -422,6 +422,10 @@ class Ofdm(Block):
         #: Built on first use -- see the c2_packetizer/c2_modem properties.
         self._c2_packetizer = None
         self._c2_modem = None
+        #: Last decoded C2 region, stashed by _decode_payload_from_header()
+        #: BEFORE the main payload decode that may raise -- so a frame whose
+        #: video payload is uncorrectable can still hand up its control data.
+        self._last_c2_result = {"c2_bits": None, "c2_crc_valid": None, "c2_evm": None}
         self.batch_shape_doc = (
             "generate_frame(bits): (n_batch, k * n_data * bits_per_symbol) "
             "bits -> (n_batch, n_samples) complex iq. "
@@ -706,6 +710,10 @@ class Ofdm(Block):
         #: Built on first use -- see the c2_packetizer/c2_modem properties.
         self._c2_packetizer = None
         self._c2_modem = None
+        #: Last decoded C2 region, stashed by _decode_payload_from_header()
+        #: BEFORE the main payload decode that may raise -- so a frame whose
+        #: video payload is uncorrectable can still hand up its control data.
+        self._last_c2_result = {"c2_bits": None, "c2_crc_valid": None, "c2_evm": None}
 
         return self.bits_per_ofdm_symbol
 
@@ -1113,13 +1121,20 @@ class Ofdm(Block):
                 "bits": None,
                 "crc_valid": None,
                 "evm": None,
+                # Present-but-None on this path too: the dict's contract
+                # is a fully enumerated key set, and symbol_diagnostics
+                # was previously missing here while present on success.
+                "symbol_diagnostics": None,
+                "c2_bits": None,
+                "c2_crc_valid": None,
+                "c2_evm": None,
             }
 
         h = self._decode_header_from_sync(rx_iq, start_index, n_payload_symbols)
         p = self._decode_payload_from_header(
             h["rx_corrected"], h["pos"], h["h_hat_data"], h["payload_modem"],
             h["payload_packetizer"], h["encoded_bit_count"], h["n_payload_symbols"],
-            h["h_hat_pilots"], h["dmrs_interval"],
+            h["h_hat_pilots"], h["dmrs_interval"], h["c2_len_bytes"],
         )
 
         return {
@@ -1135,6 +1150,12 @@ class Ofdm(Block):
             "crc_valid": p["crc_valid"],
             "evm": p["evm"],
             "symbol_diagnostics": p.get("symbol_diagnostics"),  # TEMP diagnostic, see _decode_payload_from_header()
+            # C2 region (framing/c2.py). Always present, None when the
+            # frame carries no C2 region -- matching this dict's
+            # fully-enumerated-key-set contract.
+            "c2_bits": p["c2_bits"],
+            "c2_crc_valid": p["c2_crc_valid"],
+            "c2_evm": p["c2_evm"],
         }
 
     def _decode_header_from_sync(self, rx_iq: Any, start_index: Any, n_payload_symbols: Optional[int] = None) -> Dict[str, Any]:
@@ -1192,6 +1213,7 @@ class Ofdm(Block):
         # receiver never has to be told the transmitter's dmrs_interval.
         # self.dmrs_interval is transmit-side only.
         rx_dmrs_interval = header_fields["dmrs_interval"]
+        rx_c2_len_bytes = header_fields["c2_len_bytes"]
 
         # strict_fec_check (see __init__'s own comment): reject any
         # decoded fec0/fec1 this receiver wasn't itself configured for,
@@ -1282,7 +1304,12 @@ class Ofdm(Block):
         # generate_frame()'s own guard -- MAX_PAYLOAD_SYMBOLS bounds
         # airtime, and DMRS comes out of that budget rather than
         # extending it.
-        decoded_n_total_slots = _dmrs.total_slots(decoded_n_payload_symbols, rx_dmrs_interval)
+        decoded_n_c2 = _c2.n_c2_symbols(rx_c2_len_bytes, self.grid.n_data)
+        # total_slots(n_data, interval) is already n_data + its DMRS, and
+        # n_data here is BOTH regions -- C2 plus the main payload.
+        decoded_n_total_slots = _dmrs.total_slots(
+            decoded_n_c2 + decoded_n_payload_symbols, rx_dmrs_interval
+        )
         if decoded_n_total_slots > self.MAX_PAYLOAD_SYMBOLS:
             # Defensive check, not just a coherence-time rule here: this is
             # exactly the failure mode found during development -- a bad
@@ -1290,9 +1317,10 @@ class Ofdm(Block):
             # then crashed deep inside slot extraction instead of failing
             # clearly right here.
             raise ValueError(
-                f"decoded header claims {decoded_n_payload_symbols} payload "
-                f"symbols (+ {decoded_n_total_slots - decoded_n_payload_symbols} DMRS "
-                f"= {decoded_n_total_slots} slots), exceeding "
+                f"decoded header claims {decoded_n_c2} C2 + "
+                f"{decoded_n_payload_symbols} payload symbols (+ "
+                f"{decoded_n_total_slots - decoded_n_c2 - decoded_n_payload_symbols} "
+                f"DMRS = {decoded_n_total_slots} slots), exceeding "
                 f"MAX_PAYLOAD_SYMBOLS={self.MAX_PAYLOAD_SYMBOLS} "
                 f"-- likely header corruption, not a legitimately long frame"
             )
@@ -1322,6 +1350,7 @@ class Ofdm(Block):
             "encoded_bit_count": encoded_bit_count,
             "n_payload_symbols": n_payload_symbols,
             "dmrs_interval": rx_dmrs_interval,
+            "c2_len_bytes": rx_c2_len_bytes,
             "pos": pos,
         }
 
@@ -1363,7 +1392,7 @@ class Ofdm(Block):
     def _decode_payload_from_header(
         self, rx_corrected: Any, pos: Any, h_hat_data: Any, payload_modem: Any,
         payload_packetizer: Any, encoded_bit_count: int, n_payload_symbols: int,
-        h_hat_pilots: Any = None, dmrs_interval: int = 0,
+        h_hat_pilots: Any = None, dmrs_interval: int = 0, c2_len_bytes: int = 0,
     ) -> Dict[str, Any]:
         """Payload extraction through FEC-decode/CRC-check/EVM -- the
         other half of rx_process(), extracted for the same reuse reason
@@ -1393,8 +1422,12 @@ class Ofdm(Block):
         # slot map is rebuilt here from the same (n_payload_symbols,
         # interval) pair the transmitter used, so the two cannot disagree
         # about which slot is which.
-        n_dmrs = _dmrs.n_dmrs_symbols(n_payload_symbols, dmrs_interval)
-        n_total_slots = n_payload_symbols + n_dmrs
+        # The payload region holds the C2 symbols first, then the main
+        # payload, with DMRS interleaved across both (see framing/c2.py).
+        n_c2 = _c2.n_c2_symbols(c2_len_bytes, self.grid.n_data)
+        n_data_total = n_c2 + n_payload_symbols
+        n_dmrs = _dmrs.n_dmrs_symbols(n_data_total, dmrs_interval)
+        n_total_slots = n_data_total + n_dmrs
         symbol_starts = pos[:, None] + xp.arange(n_total_slots)[None, :] * self.slot_len  # (n_batch, n_total_slots)
         sample_idx = symbol_starts[:, :, None] + xp.arange(self.slot_len)[None, None, :]  # (n_batch, n_total_slots, slot_len)
         # Explicit bounds check, matching _extract_slot()'s OLD per-symbol
@@ -1416,17 +1449,17 @@ class Ofdm(Block):
                 f"payload extraction needs samples up to index {int(sample_idx.max())} "
                 f"but rx_corrected only has {rx_corrected.shape[1]} -- likely a "
                 f"corrupted/truncated frame (insufficient samples for "
-                f"{n_payload_symbols} payload + {n_dmrs} DMRS symbols)"
+                f"{n_c2} C2 + {n_payload_symbols} payload + {n_dmrs} DMRS symbols)"
             )
         batch_idx = xp.arange(n_batch)[:, None, None]
         all_slots = rx_corrected[batch_idx, sample_idx]  # (n_batch, n_total_slots, slot_len)
 
-        n_rows = n_batch * n_payload_symbols
+        n_rows = n_batch * n_data_total
         if n_dmrs == 0:
             data_slots = all_slots
-            h_hat_combined = xp.repeat(h_hat_data, n_payload_symbols, axis=0)  # batch-major/symbol-minor, matches combined_slots' own row order
+            h_hat_combined = xp.repeat(h_hat_data, n_data_total, axis=0)  # batch-major/symbol-minor, matches combined_slots' own row order
             h_hat_pilots_combined = (
-                None if h_hat_pilots is None else xp.repeat(h_hat_pilots, n_payload_symbols, axis=0)
+                None if h_hat_pilots is None else xp.repeat(h_hat_pilots, n_data_total, axis=0)
             )
         else:
             # Split the region, then re-estimate H[k] at each DMRS and give
@@ -1439,7 +1472,7 @@ class Ofdm(Block):
             # h_hat_combined was one estimate repeated over every payload
             # symbol, so a long frame equalized its last symbol against a
             # channel measured milliseconds earlier.
-            slot_map = _dmrs.dmrs_slot_map(n_payload_symbols, dmrs_interval)
+            slot_map = _dmrs.dmrs_slot_map(n_data_total, dmrs_interval)
             data_at = xp.asarray(np.where(slot_map == _dmrs.DATA_SLOT)[0])
             dmrs_at = xp.asarray(np.where(slot_map == _dmrs.DMRS_SLOT)[0])
 
@@ -1447,7 +1480,7 @@ class Ofdm(Block):
             # Host-side: n_segments is tiny (<= 8) and this is pure
             # bookkeeping, so it is built once with numpy and moved over as
             # a single index array rather than repeated on the device.
-            seg_lengths = _dmrs.segment_lengths(n_payload_symbols, dmrs_interval)
+            seg_lengths = _dmrs.segment_lengths(n_data_total, dmrs_interval)
             seg_index = xp.asarray(np.repeat(np.arange(len(seg_lengths)), seg_lengths))
 
             data_slots = all_slots[:, data_at, :]
@@ -1531,6 +1564,68 @@ class Ofdm(Block):
             # training estimate" behavior without reverting code.
             cpe_to_apply = xp.zeros_like(cpe_to_apply)
         equalized_combined = equalized_combined * xp.exp(-1j * cpe_to_apply)[:, None]
+
+        # --- split the two payload regions -------------------------------
+        #
+        # Everything above is region-agnostic on purpose: gathering,
+        # equalization and CPE correction all apply to the channel, which
+        # does not care which region a symbol belongs to. Only DEMODULATION
+        # differs, because the C2 region is QPSK while the main payload is
+        # whatever the header advertised.
+        #
+        # The boundary is derived, never signalled -- n_c2 comes from
+        # c2_len_bytes plus the fixed profile, computed by the same
+        # framing/c2.py helper the transmitter used.
+        #
+        # Row order is batch-major/symbol-minor, so the split is along
+        # axis 1 of the (n_batch, n_data_total, ...) view -- NOT a flat row
+        # slice, which would take item 0's whole frame instead of each
+        # item's C2 symbols.
+        equalized_c2 = None
+        if n_c2:
+            n_carriers = equalized_combined.shape[-1]
+            eq_view = equalized_combined.reshape(n_batch, n_data_total, n_carriers)
+            equalized_c2 = eq_view[:, :n_c2, :].reshape(n_batch * n_c2, n_carriers)
+            equalized_combined = eq_view[:, n_c2:, :].reshape(
+                n_batch * n_payload_symbols, n_carriers
+            )
+            # The per-symbol pilot/CPE arrays are diagnostics for the MAIN
+            # region below, so they follow the same slice -- otherwise
+            # evm_per_symbol and pilot_cpe_per_symbol would disagree in
+            # length and silently pair up the wrong symbols.
+            pilot_ratio = pilot_ratio.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
+                n_batch * n_payload_symbols, -1
+            )
+            cpe_per_symbol = cpe_per_symbol.reshape(n_batch, n_data_total)[:, n_c2:].reshape(-1)
+            cpe_to_apply = cpe_to_apply.reshape(n_batch, n_data_total)[:, n_c2:].reshape(-1)
+
+        # --- decode C2 FIRST ----------------------------------------------
+        #
+        # Before the main payload, deliberately. payload_packetizer.decode()
+        # raises on an uncorrectable codeword (see Packetizer's docstring),
+        # and that exception must not be able to take the control link down
+        # with it -- the entire point of the region. Stashed on self as well
+        # as returned, mirroring _last_payload_symbol_diagnostics, so
+        # rx_streaming() can still surface C2 from its own except branch
+        # when the main region gives up.
+        c2_result: Dict[str, Any] = {"c2_bits": None, "c2_crc_valid": None, "c2_evm": None}
+        if n_c2:
+            c2_demod, c2_err_rows, c2_ref_rows = self.c2_modem.demodulate_stats(equalized_c2)
+            c2_wire = c2_demod.reshape(n_batch, -1)[:, : _c2.c2_encoded_bits(c2_len_bytes)]
+            c2_result["c2_evm"] = xp.sqrt(
+                c2_err_rows.reshape(n_batch, n_c2).sum(axis=-1)
+                / c2_ref_rows.reshape(n_batch, n_c2).sum(axis=-1)
+            )
+            try:
+                decoded_c2 = self.c2_packetizer.decode(c2_wire)
+                c2_result["c2_bits"] = decoded_c2["bits"][:, : c2_len_bytes * 8]
+                c2_result["c2_crc_valid"] = decoded_c2["crc_valid"]
+            except (ValueError, NotImplementedError):
+                # An uncorrectable C2 codeword is a delivery failure, not a
+                # frame-level error: the main payload may still be fine, so
+                # report it and carry on rather than raising.
+                c2_result["c2_crc_valid"] = xp.zeros(n_batch, dtype=bool)
+        self._last_c2_result = c2_result
 
         # Hard decision fused with the EVM power sums (see
         # modem/_numba_mapper.py): the nearest constellation point is
@@ -1625,7 +1720,10 @@ class Ofdm(Block):
         evm_ref = evm_ref_rows.reshape(n_batch, n_payload_symbols).sum(axis=-1)
         evm = xp.sqrt(evm_err / evm_ref).astype("float32")
 
-        return {"bits": raw_bits, "crc_valid": crc_valid, "evm": evm, "symbol_diagnostics": symbol_diagnostics}
+        return {
+            "bits": raw_bits, "crc_valid": crc_valid, "evm": evm,
+            "symbol_diagnostics": symbol_diagnostics, **c2_result,
+        }
 
     # -- streaming receiver ----------------------------------------------
     # rx_process() (above) assumes the caller already has one complete,
@@ -1804,10 +1902,17 @@ class Ofdm(Block):
             # accounts for. Using the payload count here would declare
             # the frame complete early, hand _decode_payload_from_header
             # a truncated buffer, and evict the tail of every
-            # DMRS-bearing frame. This is the only frame-length
-            # computation outside _decode_payload_from_header.
+            # DMRS-bearing frame. The C2 region adds a third term for
+            # the same reason -- it is payload-region slots too, so
+            # omitting it truncates every C2-bearing frame and the
+            # bounds check then raises BEFORE C2 is even decoded,
+            # defeating the point of decoding it first. This is the
+            # only frame-length computation outside
+            # _decode_payload_from_header.
             frame_end = pos_scalar + _dmrs.total_slots(
-                h["n_payload_symbols"], h["dmrs_interval"]
+                _c2.n_c2_symbols(h["c2_len_bytes"], self.grid.n_data)
+                + h["n_payload_symbols"],
+                h["dmrs_interval"],
             ) * self.slot_len
             if self._stream_buffer.shape[-1] < frame_end:
                 return None  # keep accumulating
@@ -1825,10 +1930,11 @@ class Ofdm(Block):
                 p = self._decode_payload_from_header(
                     rx_corrected_full, h["pos"], h["h_hat_data"], h["payload_modem"],
                     h["payload_packetizer"], h["encoded_bit_count"], h["n_payload_symbols"],
-                    h["h_hat_pilots"], h["dmrs_interval"],
+                    h["h_hat_pilots"], h["dmrs_interval"], h["c2_len_bytes"],
                 )
             except (ValueError, NotImplementedError):
                 self.stream_debug_counts["payload_fail"] += 1  # TEMP diagnostic, see reset_stream()
+                frame_start_for_c2 = self._stream_frame_start
                 if getattr(self, "debug_payload_symbols", False):
                     # _decode_payload_from_header() stashes this on self
                     # BEFORE the exception-raising decode call -- see its
@@ -1839,10 +1945,34 @@ class Ofdm(Block):
                 self._stream_state = "SEEKING"
                 self._stream_frame_start = None
                 self._stream_header = None
+                # The main payload is gone, but the C2 region may not be
+                # -- that is the whole reason it exists. C2 is decoded and
+                # stashed BEFORE the raising main decode (see
+                # _decode_payload_from_header), so hand it up here rather
+                # than dropping the frame silently. Returning None would
+                # throw away control data that arrived intact.
+                stashed_c2 = self._last_c2_result
+                if stashed_c2.get("c2_bits") is not None:
+                    return {
+                        "frame_found": True,
+                        "start_index": xp.asarray([frame_start_for_c2]),
+                        "sync_metric": None,
+                        "rssi_db": None,
+                        "cfo_estimate": h["cfo_estimate"],
+                        "channel_estimate": h["h_hat_data"],
+                        "n_payload_symbols": h["n_payload_symbols"],
+                        "header": h["header_fields"],
+                        "bits": None,
+                        "crc_valid": None,
+                        "evm": None,
+                        "symbol_diagnostics": None,
+                        **stashed_c2,
+                    }
                 return None
 
             result = {
                 "frame_found": True,
+                **{k: p[k] for k in ("c2_bits", "c2_crc_valid", "c2_evm")},
                 "start_index": xp.asarray([self._stream_frame_start]),
                 "sync_metric": None,  # not retained across the multi-call accumulation
                 "rssi_db": compute_rssi_db(xp, self._stream_buffer[:, : self.fft_size]),
