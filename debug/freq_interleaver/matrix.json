@@ -1,0 +1,352 @@
+[
+ {
+  "a": 0.2,
+  "delay_ns": 50,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 100,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 200,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 500,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 1000,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 50,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 100,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 200,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 500,
+  "soft": false,
+  "off": 100,
+  "on": 99
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 1000,
+  "soft": false,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 50,
+  "soft": false,
+  "off": 0,
+  "on": 95
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 100,
+  "soft": false,
+  "off": 0,
+  "on": 94
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 200,
+  "soft": false,
+  "off": 0,
+  "on": 95
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 500,
+  "soft": false,
+  "off": 69,
+  "on": 95
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 1000,
+  "soft": false,
+  "off": 96,
+  "on": 98
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 50,
+  "soft": false,
+  "off": 0,
+  "on": 8
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 100,
+  "soft": false,
+  "off": 0,
+  "on": 9
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 200,
+  "soft": false,
+  "off": 0,
+  "on": 31
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 500,
+  "soft": false,
+  "off": 0,
+  "on": 11
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 1000,
+  "soft": false,
+  "off": 0,
+  "on": 23
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 50,
+  "soft": false,
+  "off": 0,
+  "on": 6
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 100,
+  "soft": false,
+  "off": 0,
+  "on": 1
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 200,
+  "soft": false,
+  "off": 0,
+  "on": 1
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 500,
+  "soft": false,
+  "off": 0,
+  "on": 0
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 1000,
+  "soft": false,
+  "off": 0,
+  "on": 0
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 50,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 100,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 200,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 500,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.2,
+  "delay_ns": 1000,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 50,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 100,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 200,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 500,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.4,
+  "delay_ns": 1000,
+  "soft": true,
+  "off": 100,
+  "on": 100
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 50,
+  "soft": true,
+  "off": 39,
+  "on": 97
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 100,
+  "soft": true,
+  "off": 83,
+  "on": 99
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 200,
+  "soft": true,
+  "off": 99,
+  "on": 99
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 500,
+  "soft": true,
+  "off": 98,
+  "on": 99
+ },
+ {
+  "a": 0.6,
+  "delay_ns": 1000,
+  "soft": true,
+  "off": 99,
+  "on": 99
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 50,
+  "soft": true,
+  "off": 3,
+  "on": 85
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 100,
+  "soft": true,
+  "off": 0,
+  "on": 83
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 200,
+  "soft": true,
+  "off": 0,
+  "on": 82
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 500,
+  "soft": true,
+  "off": 79,
+  "on": 81
+ },
+ {
+  "a": 0.8,
+  "delay_ns": 1000,
+  "soft": true,
+  "off": 84,
+  "on": 84
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 50,
+  "soft": true,
+  "off": 1,
+  "on": 46
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 100,
+  "soft": true,
+  "off": 0,
+  "on": 63
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 200,
+  "soft": true,
+  "off": 0,
+  "on": 78
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 500,
+  "soft": true,
+  "off": 23,
+  "on": 60
+ },
+ {
+  "a": 1.0,
+  "delay_ns": 1000,
+  "soft": true,
+  "off": 63,
+  "on": 64
+ }
+]
