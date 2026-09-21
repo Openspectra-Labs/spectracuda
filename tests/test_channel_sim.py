@@ -186,3 +186,85 @@ def test_noise_draw_len_shorter_than_the_input_raises():
         Channel(snr_db=20.0, noise_draw_len=10, backend="numpy").process(
             np.ones((1, 100), dtype="complex64")
         )
+
+
+# -- sparse path specification (paths_to_taps) -------------------------
+
+
+def test_paths_to_taps_places_paths_at_their_sample_delays():
+    taps, dop, delays = Channel.paths_to_taps([
+        {"amplitude": 1.0, "delay_ns": 0},
+        {"amplitude": 0.6, "delay_ns": 500, "phase_rad": 1.2, "doppler_hz": 300.0},
+    ], 20e6)
+    assert taps.shape == (11,)                       # 500 ns = 10 samples
+    assert np.flatnonzero(taps).tolist() == [0, 10]
+    assert taps[0] == pytest.approx(1.0)
+    assert taps[10] == pytest.approx(0.6 * np.exp(1j * 1.2), abs=1e-6)
+    assert dop[10] == 300.0
+    assert delays == {0: 0.0, 10: 500.0}
+
+
+def test_paths_to_taps_reports_the_delay_it_actually_realized():
+    """Delays quantize to whole samples. The helper returns what it built
+    so a caller reports quantization instead of implying 50 ns resolution
+    can express any physical delay."""
+    _, _, delays = Channel.paths_to_taps([
+        {"amplitude": 1.0, "delay_ns": 0},
+        {"amplitude": 0.5, "delay_ns": 130},         # 2.6 samples -> 3
+    ], 20e6)
+    assert delays[3] == pytest.approx(150.0)         # not 130
+
+
+def test_paths_to_taps_sums_paths_that_land_on_one_sample():
+    """Two unresolvable paths add coherently -- which is what the channel
+    does -- rather than one overwriting the other."""
+    taps, _, _ = Channel.paths_to_taps([
+        {"amplitude": 1.0, "delay_ns": 0},
+        {"amplitude": 0.3, "delay_ns": 100},
+        {"amplitude": 0.4, "delay_ns": 110},         # also rounds to 2 samples
+    ], 20e6)
+    assert taps[2] == pytest.approx(0.7, abs=1e-6)
+
+
+def test_paths_to_taps_refuses_a_collision_with_different_doppler():
+    """One tap cannot carry two Doppler shifts; silently dropping one
+    would quietly change the channel being tested."""
+    with pytest.raises(ValueError, match="two.*Doppler"):
+        Channel.paths_to_taps([
+            {"amplitude": 1.0, "delay_ns": 0},
+            {"amplitude": 0.3, "delay_ns": 100, "doppler_hz": 100.0},
+            {"amplitude": 0.4, "delay_ns": 110, "doppler_hz": 300.0},
+        ], 20e6)
+
+
+def test_paths_to_taps_round_trips_through_process():
+    """The helper's output must actually drive process() to the same thing
+    a hand-built dense channel would."""
+    x = (np.random.default_rng(11).standard_normal((1, 2000))
+         + 1j * np.random.default_rng(12).standard_normal((1, 2000))).astype("complex64")
+    taps, dop, _ = Channel.paths_to_taps([
+        {"amplitude": 1.0, "delay_ns": 0, "doppler_hz": 1600.0},
+        {"amplitude": 0.8, "delay_ns": 200, "phase_rad": 0.7, "doppler_hz": 1900.0},
+    ], 20e6)
+    via_helper = Channel(multipath_taps=taps, tap_doppler_hz=dop,
+                         sample_rate_hz=20e6, backend="numpy").process(x)
+    dense = np.zeros(5, dtype="complex64")
+    dense[0], dense[4] = 1.0, 0.8 * np.exp(1j * 0.7)
+    dense_dop = np.array([1600.0, 0, 0, 0, 1900.0])
+    via_dense = Channel(multipath_taps=dense, tap_doppler_hz=dense_dop,
+                        sample_rate_hz=20e6, backend="numpy").process(x)
+    np.testing.assert_allclose(np.asarray(via_helper), np.asarray(via_dense), atol=1e-6)
+
+
+def test_zero_taps_are_skipped_without_changing_the_result():
+    """The sparse-skip optimization must be invisible: a channel padded
+    with zero taps has to equal the same channel without them."""
+    x = (np.random.default_rng(13).standard_normal((1, 1500))
+         + 1j * np.random.default_rng(14).standard_normal((1, 1500))).astype("complex64")
+    tight = np.array([1.0, 0.5], dtype="complex64")
+    padded = np.array([1.0, 0.5, 0.0, 0.0, 0.0], dtype="complex64")
+    a = Channel(multipath_taps=tight, tap_doppler_hz=[0.0, 200.0],
+                sample_rate_hz=20e6, backend="numpy").process(x)
+    b = Channel(multipath_taps=padded, tap_doppler_hz=[0.0, 200.0, 0, 0, 0],
+                sample_rate_hz=20e6, backend="numpy").process(x)
+    np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=0, rtol=0)

@@ -183,6 +183,59 @@ class Channel(Block):
         taps = taps / np.sqrt(np.sum(np.abs(taps) ** 2))
         return taps.astype("complex64")
 
+    @staticmethod
+    def paths_to_taps(paths: Any, sample_rate_hz: float):
+        """Build (taps, tap_doppler_hz, delays_ns) from a sparse path list.
+
+        `multipath_taps` is a DENSE array indexed by integer sample delay,
+        which is awkward when the physical paths are few and far apart --
+        a 1000 ns echo at 20 MSps needs a 21-entry array that is 19 zeros.
+        This turns the natural description
+
+            [{"amplitude": 1.0, "delay_ns": 0},
+             {"amplitude": 0.6, "delay_ns": 500, "phase_rad": 1.2,
+              "doppler_hz": 300.0}]
+
+        into the dense form process() wants, and returns the delays it
+        actually realized so a caller can report QUANTIZATION rather than
+        quietly pretending arbitrary physical delays are representable.
+
+        A delay is rounded to the nearest sample; at 20 MSps one sample is
+        50 ns, so 50/100/200/500/1000 ns are exact and anything between
+        them is not. Two paths that round onto the SAME sample are summed
+        coherently (that is what the channel itself does) -- unless their
+        Doppler shifts differ, which one tap cannot represent, and which
+        raises rather than silently dropping one.
+        """
+        paths = list(paths)
+        if not paths:
+            raise ValueError("paths is empty")
+        idx, out = {}, {}
+        for i, p in enumerate(paths):
+            a = float(p["amplitude"])
+            phi = float(p.get("phase_rad", 0.0))
+            fd = float(p.get("doppler_hz", 0.0))
+            k = int(round(float(p["delay_ns"]) * sample_rate_hz / 1e9))
+            if k < 0:
+                raise ValueError(f"path {i}: negative delay_ns")
+            if k in out and out[k][1] != fd:
+                raise ValueError(
+                    f"path {i} rounds to sample {k}, already taken by a path "
+                    f"with doppler_hz={out[k][1]} -- one tap cannot carry two "
+                    f"Doppler shifts; separate the delays or match the shifts"
+                )
+            prev = out.get(k, (0j, fd))[0]
+            out[k] = (prev + a * np.exp(1j * phi), fd)
+            idx.setdefault(k, []).append(i)
+        n = max(out) + 1
+        taps = np.zeros(n, dtype="complex64")
+        dop = np.zeros(n, dtype="float64")
+        for k, (c, fd) in out.items():
+            taps[k] = c
+            dop[k] = fd
+        delays_ns = {k: k * 1e9 / sample_rate_hz for k in sorted(out)}
+        return taps, dop, delays_ns
+
     def process(self, tx_iq: Any, **kwargs: Any) -> Any:
         xp = self.xp
         tx_iq = xp.asarray(tx_iq)
@@ -215,6 +268,11 @@ class Channel(Block):
             n = xp.arange(n_samples, dtype="float64")
             out = xp.zeros((n_batch, n_samples), dtype="complex64")
             for k in range(self.multipath_taps.shape[-1]):
+                # Sparse channels are mostly zero taps (a 1000 ns echo at
+                # 20 MSps is 1 of 21); each contributes nothing but costs a
+                # full-length shift, rotate and multiply.
+                if self.multipath_taps[k] == 0:
+                    continue
                 shifted = rx if k == 0 else xp.concatenate(
                     [xp.zeros((n_batch, k), dtype=rx.dtype), rx[:, :-k]], axis=-1
                 )
