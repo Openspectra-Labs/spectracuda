@@ -74,8 +74,15 @@ so of the four settings above:
 **The 20 MSps pair works with the shipped wire format unchanged. The
 10 MSps pair does not** -- its high-mobility setting has no code.
 
-The cheap fix, if 10 MSps needs the high-mobility mode, is to re-point
-code 3 from `64` to `8`: `iv=64` is dead weight by measurement (1024 us
+`iv=8` now has a second, independent case needing it: at 20 MSps with a
+strong echo (a=0.6) and 300 Hz of differential Doppler, iv=32 delivers
+7/60 and iv=16 delivers 57/60, but iv=8 (144 us true) reaches 59/60 --
+see `docs/2026-09-21-multipath-severity-characterization.md` §9. So the
+missing code blocks a measured 20 MSps case, not only the 10 MSps
+high-mobility mode it was first noted for.
+
+The cheap fix, if either needs it, is to re-point code 3 from `64` to
+`8`: `iv=64` is dead weight by measurement (1024 us
 at 10 MSps already fails at 300 Hz, and 2048 us is worse), and the field
 keeps its width. That breaks interoperability with any already-deployed
 build, so it is a decision rather than a patch, and it has not been made.

@@ -352,6 +352,72 @@ that were not used to choose it. That is a caveat about method; the 4-bit
 floor itself held across the full range of cases and does not depend on
 the clip tuning.
 
+## 9. The worst channel: reflections AND Doppler together
+
+Nothing above tested the combination. The phase 3 sweep had Doppler plus
+reflections but neither soft decision nor `interleaver2`; the
+`interleaver2` matrix had reflections and both features but `delta_f = 0`,
+so DMRS was inert throughout it.
+
+15 dB, 16QAM, iv=32, f_los=1600 Hz, 100 frames/cell
+(`examples/worst_case_matrix.py`):
+
+| a | delay | Δf | baseline | il2 | soft | both |
+|---|---|---|---|---|---|---|
+| 0.6 | 50 ns | 0 | 0 | **94** | 30 | 97 |
+| 0.6 | 50 ns | 100 | 0 | 72 | 12 | **99** |
+| 0.6 | 50 ns | 300 | 0 | **0** | **0** | 10 |
+| 0.6 | 200 ns | 0 | 0 | 93 | 98 | 98 |
+| 0.6 | 200 ns | 100 | 0 | 58 | 88 | 92 |
+| 0.6 | 200 ns | 300 | 0 | **0** | **0** | 1 |
+| 0.8 | 50 ns | 0 | 0 | 10 | 3 | **80** |
+| 0.8 | 50 ns | 100 | 0 | 4 | 0 | **70** |
+| 0.8 | 50 ns | 300 | 0 | 0 | 0 | 0 |
+| 0.8 | 200 ns | 0 | 0 | 29 | 0 | **83** |
+| 0.8 | 200 ns | 100 | 0 | 0 | 0 | **52** |
+| 0.8 | 200 ns | 300 | 0 | 0 | 0 | 0 |
+
+`interleaver2` degrades exactly as its mechanism predicts -- 94 -> 72 -> 0
+as Δf rises at a=0.6/50 ns. It disperses damage that sits in FIXED
+subcarriers, and a moving null has less fixed structure to disperse. That
+degradation is the confirmation of the mechanism, not a disappointment:
+had it helped equally at 300 Hz, the explanation in §3 would have been
+wrong.
+
+Δf=300 collapses the whole matrix at iv=32 because that is squarely the
+AGEING regime -- `2a|sin(π·Δf·ΔT)|` is 0.57 at a=0.6 with ΔT=528 µs.
+Sweeping the DMRS interval with both features on, 60 frames/cell:
+
+| a | delay | iv=32 (528 µs) | iv=16 (272 µs) | iv=8 (144 µs) |
+|---|---|---|---|---|
+| 0.6 | 50 ns | 7/60 | **57/60** | **59/60** |
+| 0.6 | 200 ns | 0/60 | **50/60** | **59/60** |
+| 0.8 | 50 ns | 0/60 | 25/60 | 33/60 |
+| 0.8 | 200 ns | 0/60 | 5/60 | 16/60 |
+
+### Conclusion: three levers, three mechanisms, none interchangeable
+
+| lever | fixes | the only thing that works at |
+|---|---|---|
+| DMRS interval | channel ageing | Δf=300 (il2 and soft both give 0) |
+| `interleaver2` | frequency-contiguous fade | Δf=0 (soft alone gives 30) |
+| soft decision | deep-but-present subcarriers | a=0.8, once the other two are in place |
+
+The a=0.6 / 50 ns cell shows the whole thing: dead at every Doppler
+without help, recovered at every Doppler with it -- but by a DIFFERENT
+lever each time (il2 at Δf=0, both at 100, DMRS at 300).
+
+**Practical blocker, now with a concrete case.** `iv=8` is what nearly
+closes a=0.6 at Δf=300 (59/60) and it has no wire code: the 2-bit
+`dmrs_period` field carries {0,16,32,64}. This was already recorded in
+`docs/2026-09-21-dmrs-interval-operating-guidance.md` as a blocker for the
+10 MSps high-mobility mode; there is now a specific channel that needs it.
+
+**Remaining edge of the envelope.** a=0.8 at Δf=300 stays broken with all
+three levers (33/60, 16/60). A -2 dB echo carrying 300 Hz of differential
+Doppler is past what this PHY does, and that is a boundary rather than a
+missing feature.
+
 ## What this does not establish
 
 - **Simulation only**, deterministic taps with randomized phase — no
