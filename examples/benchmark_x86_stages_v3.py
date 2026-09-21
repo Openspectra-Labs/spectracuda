@@ -101,6 +101,7 @@ from spectracuda.fec import _native, _numba_crc
 from spectracuda.fec.crc import CRC
 from spectracuda.fec.reed_solomon import ReedSolomonCode
 from spectracuda.fec.viterbi import ConvolutionalCode
+from spectracuda.modem import Modem
 from spectracuda.mac import Mac
 from spectracuda.mac.um import UmEntity
 from spectracuda.ofdm.fft import OfdmDemodulator
@@ -139,6 +140,14 @@ def _parse_args():
     Leaving it off measures a receiver that does strictly less work than
     the one the Doppler/multipath characterization describes.
 
+    `soft` turns on soft-decision Viterbi for the inner code. It is OFF
+    by default in the library and here, and it is expensive today: the
+    demapper does a max-log LLR pass instead of a nearest-point decision,
+    and libcorrect has no fast/neon SOFT kernel so the decode forfeits
+    the accelerated one. It buys large multipath robustness -- see
+    docs/2026-09-21-multipath-severity-characterization.md -- so the
+    question this flag exists to answer is what that robustness costs.
+
     Note the real-time budget MOVES with cp: it is frame_samples / 20 MSps,
     and a longer CP means more samples per frame, so more wall-clock to
     process it. cp=64 is therefore easier to hit than cp=32 at the same
@@ -148,6 +157,7 @@ def _parse_args():
     modem_scheme = "qpsk"
     cp_len = CP_LEN_DEFAULT
     dmrs_interval = 0
+    soft_decision = False
     for arg in sys.argv[1:]:
         low = arg.lower()
         if arg.isdigit():
@@ -156,23 +166,28 @@ def _parse_args():
             cp_len = int(low[3:])
         elif low.startswith("dmrs=") and low[5:].isdigit():
             dmrs_interval = int(low[5:])
+        elif low in ("soft", "soft=1"):
+            soft_decision = True
+        elif low == "soft=0":
+            soft_decision = False
         elif low in _VALID_MODEMS:
             modem_scheme = low
         else:
             raise SystemExit(
                 f"Unrecognized argument {arg!r} -- expected a bit count (e.g. 32000), "
                 f"a cyclic prefix (e.g. cp=64), a DMRS interval (e.g. dmrs=32), "
-                f"or a modem scheme (one of {sorted(_VALID_MODEMS)})"
+                f"`soft` for soft-decision Viterbi, or a modem scheme "
+                f"(one of {sorted(_VALID_MODEMS)})"
             )
     if not 0 <= cp_len < FFT_SIZE:
         raise SystemExit(f"cp={cp_len} must be in [0, fft_size={FFT_SIZE})")
     if dmrs_interval not in (0, 16, 32, 64):
         raise SystemExit(f"dmrs={dmrs_interval} must be one of 0/16/32/64 "
                          f"(the 2-bit wire codes -- see framing/dmrs.py)")
-    return sdu_bits, modem_scheme, cp_len, dmrs_interval
+    return sdu_bits, modem_scheme, cp_len, dmrs_interval, soft_decision
 
 
-SDU_BITS, MODEM_SCHEME, CP_LEN, DMRS_INTERVAL = _parse_args()
+SDU_BITS, MODEM_SCHEME, CP_LEN, DMRS_INTERVAL, SOFT_DECISION = _parse_args()
 
 
 def _pin_to_one_core() -> str:
@@ -238,9 +253,18 @@ def _install_timing_patch(timings: dict):
         ls_process=LSChannelEstimator.process,
         mmse_process=MMSEEqualizer.process,
         um_receive=UmEntity.receive,
+        # Soft-decision decode is a DIFFERENT method, so instrumenting only
+        # decode() silently attributed the whole soft Viterbi cost to
+        # "everything else" -- it read 0.04 ms of Viterbi against 7.6 ms
+        # unbucketed on a soft run. Both are timed into the same bucket so
+        # the breakdown means the same thing either way.
+        conv_decode_soft=ConvolutionalCode.decode_soft,
+        soft_demod=Modem.demodulate_soft,
     )
     ConvolutionalCode.encode = _timed(orig["conv_encode"], "conv_encode", timings)
     ConvolutionalCode.decode = _timed(orig["conv_decode"], "conv_decode", timings)
+    ConvolutionalCode.decode_soft = _timed(orig["conv_decode_soft"], "conv_decode", timings)
+    Modem.demodulate_soft = _timed(orig["soft_demod"], "soft_demod", timings)
     ReedSolomonCode.encode = _timed(orig["rs_encode"], "rs_encode", timings)
     ReedSolomonCode.decode = _timed(orig["rs_decode"], "rs_decode", timings)
     CRC.generate_key = _timed(orig["crc_generate"], "crc_generate", timings)
@@ -255,6 +279,8 @@ def _install_timing_patch(timings: dict):
     def restore():
         ConvolutionalCode.encode = orig["conv_encode"]
         ConvolutionalCode.decode = orig["conv_decode"]
+        ConvolutionalCode.decode_soft = orig["conv_decode_soft"]
+        Modem.demodulate_soft = orig["soft_demod"]
         ReedSolomonCode.encode = orig["rs_encode"]
         ReedSolomonCode.decode = orig["rs_decode"]
         CRC.generate_key = orig["crc_generate"]
@@ -276,13 +302,13 @@ def run() -> None:
         modem=MODEM_SCHEME, fec="rs_m8", fec1="conv_v27", crc="crc16",
         sync="schmidl_cox", cfo="schmidl_cox",
         channel_estimator="ls", equalizer="mmse",
-        dmrs_interval=DMRS_INTERVAL,
+        dmrs_interval=DMRS_INTERVAL, soft_decision=SOFT_DECISION,
         backend="numpy",
     )
     print(f"=== v3 (stopwatch-timed stage breakdown -- spectracuda's own transparent "
           f"native/Numba acceleration, whatever's actually active on THIS machine) config: "
           f"fft_size={FFT_SIZE}, n_pilot={N_PILOT}, n_data={N_DATA}, cp_len={CP_LEN}, "
-          f"modem={MODEM_SCHEME}, dmrs_interval={DMRS_INTERVAL}, fec='rs_m8' (inner), fec1='conv_v27' (outer), crc=crc16, "
+          f"modem={MODEM_SCHEME}, dmrs_interval={DMRS_INTERVAL}, soft_decision={SOFT_DECISION}, fec='rs_m8' (inner), fec1='conv_v27' (outer), crc=crc16, "
           f"sync=schmidl_cox, cfo=schmidl_cox, channel_estimator=ls, equalizer=mmse, "
           f"backend=numpy, sdu_bits={SDU_BITS} ===")
     print(f"    native FEC backend (Viterbi/RS, C, transparent, fec/_native.py): "
@@ -416,6 +442,7 @@ def run() -> None:
         ("OFDM decode (FFT+CP strip)", rx_timings["ofdm_decode"]),
         ("channel estimation + equalization", rx_timings["chanest_eq"]),
         ("FEC decode -- Viterbi (fec1, outer)", rx_timings["conv_decode"]),
+        ("soft demapper (max-log LLR)", rx_timings.get("soft_demod", 0.0)),
         ("FEC decode -- Reed-Solomon (fec0, inner)", rx_timings["rs_decode"]),
         ("MAC decode", rx_timings["mac_decode"]),
     ]
