@@ -304,6 +304,8 @@ class Ofdm(Block):
         soft_decision: bool = False,
         soft_llr_bits: Optional[int] = None,
         soft_llr_clip: float = 6.0,
+        interleaver2: str = "none",
+        interleaver2_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         if fec != "none" and fec not in _FEC_SCHEME_CODES:
             raise ValueError(
@@ -398,6 +400,39 @@ class Ofdm(Block):
         # not determine coding gain.
         self.soft_llr_bits = None if soft_llr_bits is None else int(soft_llr_bits)
         self.soft_llr_clip = float(soft_llr_clip)
+        # INNER (frequency) interleaver: permutes the coded bits AFTER
+        # fec1 and immediately before they are mapped to subcarriers, and
+        # un-permutes them before Viterbi on receive. Default "none", so
+        # the wire format is unchanged unless a caller asks for it.
+        #
+        # This is a DIFFERENT stage from `interleaver=`, not a second copy
+        # of it. The existing one sits between fec0 and fec1, so on
+        # receive it spreads Viterbi's burst OUTPUT across RS codewords --
+        # it protects RS. This one spreads the CHANNEL's burst across
+        # Viterbi's input -- it protects Viterbi. Concatenated systems
+        # normally have both (DVB-T: outer interleaver between RS and
+        # conv, inner between conv and mapper; 802.11a/g has the inner
+        # one at conv -> mapper).
+        #
+        # Why it matters: a 1-sample echo puts ONE wide null across the
+        # band. At 216 data subcarriers x 4 bits that is ~144 CONSECUTIVE
+        # damaged coded bits per OFDM symbol, against a K=7 traceback of
+        # ~35-49 bits, so the trellis has no reliable observation anywhere
+        # in the window and Viterbi AMPLIFIES (0.052 raw BER in, 0.071
+        # out). Permuting within the symbol turns that single 144-bit
+        # burst into ~6-bit gaps -- same errors, a regime the code handles
+        # easily. Measured 0/40 -> 38/40 on the case neither DMRS nor soft
+        # decision could reach; see
+        # docs/2026-09-21-multipath-severity-characterization.md.
+        #
+        # Applied PER OFDM SYMBOL (block = bits_per_ofdm_symbol), which is
+        # the depth 802.11a/g uses: it bounds latency and matches the
+        # damage period, since a static fade hits the same subcarriers in
+        # every symbol. Interleaver GEOMETRY is not a detail -- a badly
+        # dimensioned block measured 1/40 where a good one measured 38/40.
+        self.interleaver2 = interleaver2
+        self.interleaver2_kwargs = interleaver2_kwargs or {}
+        self._interleaver2_cache: Dict[int, Any] = {}
         if iq_dtype not in ("float16", "float32"):
             raise ValueError(
                 f"iq_dtype={iq_dtype!r}; expected 'float16' or 'float32' "
@@ -1055,6 +1090,8 @@ class Ofdm(Block):
         if padding_bits > 0:
             filler = xp.tile(xp.asarray(self._payload_filler_bits[:padding_bits]), (n_batch, 1))
             modulated_bits = xp.concatenate([modulated_bits, filler], axis=-1)
+        # After padding, so every block is a full OFDM symbol's worth.
+        modulated_bits = self._apply_interleaver2(modulated_bits, encode=True)
 
         pilots_batch = xp.tile(self.pilot_values, (n_batch, 1))
         preamble_batch = xp.tile(self._preamble_time, (n_batch, 1))
@@ -1468,6 +1505,33 @@ class Ofdm(Block):
         every payload symbol the single training-symbol estimate."""
         return h_hat_segments[:, seg_index, :].reshape(n_rows, h_hat_segments.shape[-1])
 
+    def _get_interleaver2(self, n_bits: int) -> Any:
+        if n_bits not in self._interleaver2_cache:
+            self._interleaver2_cache[n_bits] = resolve(
+                "interleaver", self.interleaver2, n_bits=n_bits,
+                backend=self.backend, **self.interleaver2_kwargs
+            )
+        return self._interleaver2_cache[n_bits]
+
+    def _apply_interleaver2(self, flat: Any, encode: bool) -> Any:
+        """Permute (or un-permute) within each OFDM symbol's coded bits.
+
+        `flat` is (n_batch, n_symbols * bits_per_ofdm_symbol) and already
+        padded to whole symbols, so it reshapes exactly. Operating on the
+        rows rather than the whole stream is what makes this a FREQUENCY
+        interleaver: one row is one OFDM symbol, and bit i of a row lands
+        on subcarrier i // bits_per_symbol.
+        """
+        if self.interleaver2 == "none":
+            return flat
+        xp = self.xp
+        n_batch = flat.shape[0]
+        block = self.bits_per_ofdm_symbol
+        rows = flat.reshape(-1, block)
+        il = self._get_interleaver2(block)
+        out = il.encode(rows) if encode else il.decode(rows)
+        return xp.asarray(out).reshape(n_batch, -1)
+
     def _decode_payload_from_header(
         self, rx_corrected: Any, pos: Any, h_hat_data: Any, payload_modem: Any,
         payload_packetizer: Any, encoded_bit_count: int, n_payload_symbols: int,
@@ -1765,6 +1829,11 @@ class Ofdm(Block):
 
         bits_per_symbol_payload = demod_bits_combined.shape[-1]
         encoded_bits = demod_bits_combined.reshape(n_batch, n_payload_symbols * bits_per_symbol_payload)
+        # Un-permute BEFORE truncation to encoded_bit_count: the inner
+        # interleaver ran over whole padded OFDM symbols on transmit, so
+        # the inverse has to see the same whole symbols. Truncating first
+        # would hand it a partial block.
+        encoded_bits = self._apply_interleaver2(encoded_bits, encode=False)
 
         # Discard any automatic partial-last-symbol padding (see
         # generate_frame()'s docstring/docs/todo.md #1.10) -- the last
@@ -1797,8 +1866,13 @@ class Ofdm(Block):
             soft_payload = payload_modem.demodulate_soft(
                 equalized_combined, weight=w,
                 llr_clip=self.soft_llr_clip, llr_bits=self.soft_llr_bits)
-            soft_bits = soft_payload.reshape(
-                n_batch, n_payload_symbols * bits_per_symbol_payload
+            # Soft values take the SAME inverse permutation as the hard
+            # bits -- they are per-coded-bit quantities in the same order,
+            # so a soft path that skipped this would hand Viterbi
+            # confidences belonging to different bits.
+            soft_bits = self._apply_interleaver2(
+                soft_payload.reshape(n_batch, n_payload_symbols * bits_per_symbol_payload),
+                encode=False,
             )[:, :encoded_bit_count]
 
         # FEC-decode then CRC-strip+check, delegated to payload_packetizer
