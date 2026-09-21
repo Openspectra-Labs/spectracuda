@@ -248,9 +248,29 @@ across the board -- 1.4-2.4x, against 4-6x before these two changes.
 
 ## 8. How many LLR bits does it need?
 
-A hardware-sizing question: an FPGA Viterbi's branch-metric and
-path-metric widths follow from the LLR width. Run against exactly the
-seeds above (`examples/soft_llr_quantization_study.py`), 40 frames/cell.
+**This question is worth money in hardware and nothing in software.** The
+distinction matters and is easy to get backwards.
+
+In an FPGA the LLR width propagates straight into gate count. The
+add-compare-select unit computes `PM_new = min(PM_old + BM)`, so the
+branch-metric width sets the adder and comparator widths, the path-metric
+width follows from it, and both are instantiated 64 times for a K=7
+trellis. Halving 8 bits to 4 is a real area and timing saving, repeated
+across every state.
+
+In software it buys nothing. libcorrect's soft decoder takes a `uint8`
+per bit whatever the LLR resolution is -- quantizing to 4 bits only means
+fewer DISTINCT VALUES inside that byte, not a smaller byte, and the
+decoder does identical work. The only measurable effect is one extra
+round-and-divide per bit in the demapper, i.e. marginally SLOWER.
+
+So the throughput figures in the section above and the widths below are
+independent results. The benchmark runs at the library defaults
+(`soft_llr_bits=None`, full 8-bit, `soft_llr_clip=6.0`); nothing in the
+timing tables is quantized, and quantizing it would not improve them.
+
+Run against exactly the seeds above
+(`examples/soft_llr_quantization_study.py`), 40 frames/cell.
 
 Signed quantization, 2L+1 levels with L = 2^(b-1)-1, at the default
 clip of 6 nats:
@@ -292,16 +312,45 @@ At FULL 8-bit precision the same clip sweep is flat (12/40, 40/40, 40/40,
 33-36/40, 40/40 across clip 2 to 10), so clip sensitivity is purely a
 quantization effect and the shipped default of 6.0 needs no change.
 
+### It does not degrade gracefully -- 4 bits is a floor, not a knee
+
+The intuition to discard: that fewer bits means proportionally less
+coding gain, so a designer short of area could take 3 bits and accept a
+small loss. Below 4 bits the gain goes NEGATIVE -- worse than not doing
+soft decision at all. A coarse LLR tells the decoder "fairly sure" about
+bits it should be flagging as unknown, and confident wrong information is
+worse than the hard decoder's honest ignorance.
+
+So 4 bits is not a point on a curve to be traded against area. It is a
+floor with a cliff underneath it.
+
+### Clipping is the other half of the width decision
+
+`clip` sets what the quantizer's levels SPAN, in LLR units (nats). Too
+wide and almost everything lands on the middle level -- at clip 20 the
+4-bit case collapses to 0/40. Too narrow and levels are spent resolving
+bits that were already certain.
+
+The same 4-bit LLR on the same channel reads 25/40 at clip 6 and 40/40 at
+clip 2. Read from the default clip alone, the answer looks like 5 bits;
+with clip tuned, 4 is enough. **A whole bit of hardware, decided by a
+parameter with nothing to do with the decoder.** Any width quoted without
+its clip is meaningless.
+
 ### Sizing conclusion
 
 **4-bit signed LLR with a clip of 2-3 nats** is the hardware target: it
 keeps essentially all the coding gain outside the known broad-fade
-residual, at a quarter of the branch-metric width. 5-bit buys a little
-insurance. 3-bit and below must not be used -- they lose to hard decision.
+residual, at half the branch-metric width. 5-bit buys insurance. 3-bit
+and below must not be used.
 
-This is a simulation result at one SNR, one modulation and one payload,
-with the clip optimum found on the same cells it is quoted against; it
-sizes an experiment, not a design.
+This is a simulation result at one SNR, one modulation and one payload.
+The clip optimum was found by sweeping on the SAME five cells it is then
+quoted against -- fitting and reporting on one dataset, which will always
+flatter itself. Before this sizes RTL it should be re-checked on channels
+that were not used to choose it. That is a caveat about method; the 4-bit
+floor itself held across the full range of cases and does not depend on
+the clip tuning.
 
 ## What this does not establish
 
