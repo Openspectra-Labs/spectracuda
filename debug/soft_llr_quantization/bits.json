@@ -1,0 +1,416 @@
+[
+ {
+  "label": "a=0.2 clean",
+  "setting": "hard",
+  "a": 0.2,
+  "delay_ns": 100,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40
+ },
+ {
+  "label": "a=0.2 clean",
+  "setting": "2-bit",
+  "a": 0.2,
+  "delay_ns": 100,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 32,
+  "llr_bits": 2
+ },
+ {
+  "label": "a=0.2 clean",
+  "setting": "3-bit",
+  "a": 0.2,
+  "delay_ns": 100,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 3
+ },
+ {
+  "label": "a=0.2 clean",
+  "setting": "4-bit",
+  "a": 0.2,
+  "delay_ns": 100,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 4
+ },
+ {
+  "label": "a=0.2 clean",
+  "setting": "5-bit",
+  "a": 0.2,
+  "delay_ns": 100,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 5
+ },
+ {
+  "label": "a=0.2 clean",
+  "setting": "6-bit",
+  "a": 0.2,
+  "delay_ns": 100,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 6
+ },
+ {
+  "label": "a=0.2 clean",
+  "setting": "float(8)",
+  "a": 0.2,
+  "delay_ns": 100,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": null
+ },
+ {
+  "label": "a=0.6 d=50ns",
+  "setting": "hard",
+  "a": 0.6,
+  "delay_ns": 50,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0
+ },
+ {
+  "label": "a=0.6 d=50ns",
+  "setting": "2-bit",
+  "a": 0.6,
+  "delay_ns": 50,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 2
+ },
+ {
+  "label": "a=0.6 d=50ns",
+  "setting": "3-bit",
+  "a": 0.6,
+  "delay_ns": 50,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 3
+ },
+ {
+  "label": "a=0.6 d=50ns",
+  "setting": "4-bit",
+  "a": 0.6,
+  "delay_ns": 50,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 2,
+  "llr_bits": 4
+ },
+ {
+  "label": "a=0.6 d=50ns",
+  "setting": "5-bit",
+  "a": 0.6,
+  "delay_ns": 50,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 5,
+  "llr_bits": 5
+ },
+ {
+  "label": "a=0.6 d=50ns",
+  "setting": "6-bit",
+  "a": 0.6,
+  "delay_ns": 50,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 10,
+  "llr_bits": 6
+ },
+ {
+  "label": "a=0.6 d=50ns",
+  "setting": "float(8)",
+  "a": 0.6,
+  "delay_ns": 50,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 12,
+  "llr_bits": null
+ },
+ {
+  "label": "a=0.6 d=200ns",
+  "setting": "hard",
+  "a": 0.6,
+  "delay_ns": 200,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0
+ },
+ {
+  "label": "a=0.6 d=200ns",
+  "setting": "2-bit",
+  "a": 0.6,
+  "delay_ns": 200,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 2
+ },
+ {
+  "label": "a=0.6 d=200ns",
+  "setting": "3-bit",
+  "a": 0.6,
+  "delay_ns": 200,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 3
+ },
+ {
+  "label": "a=0.6 d=200ns",
+  "setting": "4-bit",
+  "a": 0.6,
+  "delay_ns": 200,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 25,
+  "llr_bits": 4
+ },
+ {
+  "label": "a=0.6 d=200ns",
+  "setting": "5-bit",
+  "a": 0.6,
+  "delay_ns": 200,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 5
+ },
+ {
+  "label": "a=0.6 d=200ns",
+  "setting": "6-bit",
+  "a": 0.6,
+  "delay_ns": 200,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 6
+ },
+ {
+  "label": "a=0.6 d=200ns",
+  "setting": "float(8)",
+  "a": 0.6,
+  "delay_ns": 200,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": null
+ },
+ {
+  "label": "a=0.6 d=500ns",
+  "setting": "hard",
+  "a": 0.6,
+  "delay_ns": 500,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 30
+ },
+ {
+  "label": "a=0.6 d=500ns",
+  "setting": "2-bit",
+  "a": 0.6,
+  "delay_ns": 500,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 2
+ },
+ {
+  "label": "a=0.6 d=500ns",
+  "setting": "3-bit",
+  "a": 0.6,
+  "delay_ns": 500,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 20,
+  "llr_bits": 3
+ },
+ {
+  "label": "a=0.6 d=500ns",
+  "setting": "4-bit",
+  "a": 0.6,
+  "delay_ns": 500,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 4
+ },
+ {
+  "label": "a=0.6 d=500ns",
+  "setting": "5-bit",
+  "a": 0.6,
+  "delay_ns": 500,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 5
+ },
+ {
+  "label": "a=0.6 d=500ns",
+  "setting": "6-bit",
+  "a": 0.6,
+  "delay_ns": 500,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 6
+ },
+ {
+  "label": "a=0.6 d=500ns",
+  "setting": "float(8)",
+  "a": 0.6,
+  "delay_ns": 500,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": null
+ },
+ {
+  "label": "a=0.8 d=1000ns",
+  "setting": "hard",
+  "a": 0.8,
+  "delay_ns": 1000,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0
+ },
+ {
+  "label": "a=0.8 d=1000ns",
+  "setting": "2-bit",
+  "a": 0.8,
+  "delay_ns": 1000,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 2
+ },
+ {
+  "label": "a=0.8 d=1000ns",
+  "setting": "3-bit",
+  "a": 0.8,
+  "delay_ns": 1000,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 3
+ },
+ {
+  "label": "a=0.8 d=1000ns",
+  "setting": "4-bit",
+  "a": 0.8,
+  "delay_ns": 1000,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 31,
+  "llr_bits": 4
+ },
+ {
+  "label": "a=0.8 d=1000ns",
+  "setting": "5-bit",
+  "a": 0.8,
+  "delay_ns": 1000,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 34,
+  "llr_bits": 5
+ },
+ {
+  "label": "a=0.8 d=1000ns",
+  "setting": "6-bit",
+  "a": 0.8,
+  "delay_ns": 1000,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 36,
+  "llr_bits": 6
+ },
+ {
+  "label": "a=0.8 d=1000ns",
+  "setting": "float(8)",
+  "a": 0.8,
+  "delay_ns": 1000,
+  "delta_f": 0.0,
+  "trials": 40,
+  "passed": 36,
+  "llr_bits": null
+ },
+ {
+  "label": "a=0.4 d=500ns df=300",
+  "setting": "hard",
+  "a": 0.4,
+  "delay_ns": 500,
+  "delta_f": 300.0,
+  "trials": 40,
+  "passed": 0
+ },
+ {
+  "label": "a=0.4 d=500ns df=300",
+  "setting": "2-bit",
+  "a": 0.4,
+  "delay_ns": 500,
+  "delta_f": 300.0,
+  "trials": 40,
+  "passed": 0,
+  "llr_bits": 2
+ },
+ {
+  "label": "a=0.4 d=500ns df=300",
+  "setting": "3-bit",
+  "a": 0.4,
+  "delay_ns": 500,
+  "delta_f": 300.0,
+  "trials": 40,
+  "passed": 39,
+  "llr_bits": 3
+ },
+ {
+  "label": "a=0.4 d=500ns df=300",
+  "setting": "4-bit",
+  "a": 0.4,
+  "delay_ns": 500,
+  "delta_f": 300.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 4
+ },
+ {
+  "label": "a=0.4 d=500ns df=300",
+  "setting": "5-bit",
+  "a": 0.4,
+  "delay_ns": 500,
+  "delta_f": 300.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 5
+ },
+ {
+  "label": "a=0.4 d=500ns df=300",
+  "setting": "6-bit",
+  "a": 0.4,
+  "delay_ns": 500,
+  "delta_f": 300.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": 6
+ },
+ {
+  "label": "a=0.4 d=500ns df=300",
+  "setting": "float(8)",
+  "a": 0.4,
+  "delay_ns": 500,
+  "delta_f": 300.0,
+  "trials": 40,
+  "passed": 40,
+  "llr_bits": null
+ }
+]

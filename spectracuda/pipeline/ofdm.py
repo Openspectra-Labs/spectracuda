@@ -302,6 +302,8 @@ class Ofdm(Block):
         strict_fec_check: bool = False,
         timing_advance: Optional[int] = None,
         soft_decision: bool = False,
+        soft_llr_bits: Optional[int] = None,
+        soft_llr_clip: float = 6.0,
     ) -> None:
         if fec != "none" and fec not in _FEC_SCHEME_CODES:
             raise ValueError(
@@ -389,6 +391,13 @@ class Ofdm(Block):
         # fades because faded subcarriers arrive marked maximally
         # confident.
         self.soft_decision = bool(soft_decision)
+        # LLR quantization (signed bits) and clipping range. None = full
+        # 8-bit. Both are hardware-sizing knobs: an FPGA Viterbi's
+        # branch-metric and path-metric widths follow from the first, and
+        # the second decides what those levels span -- bit width alone does
+        # not determine coding gain.
+        self.soft_llr_bits = None if soft_llr_bits is None else int(soft_llr_bits)
+        self.soft_llr_clip = float(soft_llr_clip)
         if iq_dtype not in ("float16", "float32"):
             raise ValueError(
                 f"iq_dtype={iq_dtype!r}; expected 'float16' or 'float32' "
@@ -1785,7 +1794,9 @@ class Ofdm(Block):
                 w = w.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
                     n_batch * n_payload_symbols, -1
                 )
-            soft_payload = payload_modem.demodulate_soft(equalized_combined, weight=w)
+            soft_payload = payload_modem.demodulate_soft(
+                equalized_combined, weight=w,
+                llr_clip=self.soft_llr_clip, llr_bits=self.soft_llr_bits)
             soft_bits = soft_payload.reshape(
                 n_batch, n_payload_symbols * bits_per_symbol_payload
             )[:, :encoded_bit_count]

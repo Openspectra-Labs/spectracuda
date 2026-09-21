@@ -187,7 +187,7 @@ class Modem(Block):
         return self._pt_cache
 
     def demodulate_soft(self, symbols: Any, weight: Any = None,
-                        llr_clip: float = 6.0) -> Any:
+                        llr_clip: float = 6.0, llr_bits: Any = None) -> Any:
         """Max-log soft demodulation -> one uint8 per coded bit, in
         libcorrect's convention (0 = certainly 0, 255 = certainly 1,
         128 = no information).
@@ -212,6 +212,15 @@ class Modem(Block):
         nearest point estimates the post-equalization noise power, so
         llr/(2*sigma^2) is an LLR in nats and `llr_clip` nats saturates
         the byte range.
+
+        `llr_bits` quantizes the LLR to that many SIGNED bits before it is
+        written into the byte -- None (the default) keeps the full 8-bit
+        range. This exists for hardware sizing rather than for software:
+        an FPGA Viterbi does not want 8-bit branch metrics if 4 carry the
+        same coding gain, and the add-compare-select path-metric width
+        follows directly from it. `llr_clip` is the other half of that
+        question -- bit width alone does not determine performance,
+        because the clipping range decides what those levels SPAN.
         """
         xp = self.xp
         y = xp.asarray(symbols)
@@ -232,6 +241,16 @@ class Modem(Block):
             w = xp.asarray(weight)
             llr = llr * w[..., None]
         llr = xp.clip(llr / llr_clip, -1.0, 1.0)
+        if llr_bits is not None:
+            b = int(llr_bits)
+            if b < 2:
+                raise ValueError(f"llr_bits must be >= 2 (got {b}); 1 bit IS hard decision")
+            # Mid-tread signed quantizer: 2*L+1 levels symmetric about 0,
+            # L = 2^(b-1)-1. Keeping a level AT zero matters -- that is the
+            # "no information" symbol a faded subcarrier needs to be able
+            # to produce.
+            L = float(2 ** (b - 1) - 1)
+            llr = xp.round(llr * L) / L
         soft = xp.clip(xp.round(128.0 + 127.0 * llr), 0, 255).astype("uint8")
         return soft.reshape(y.shape[0], -1)
 

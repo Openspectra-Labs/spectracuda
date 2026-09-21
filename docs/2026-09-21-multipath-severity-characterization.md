@@ -193,6 +193,63 @@ where the hard path has one) and the forfeited accelerated Viterbi (0.42
 half is removable without touching C. Timings are WSL2 medians on a noisy
 machine — indicative, not a spec.
 
+## 8. How many LLR bits does it need?
+
+A hardware-sizing question: an FPGA Viterbi's branch-metric and
+path-metric widths follow from the LLR width. Run against exactly the
+seeds above (`examples/soft_llr_quantization_study.py`), 40 frames/cell.
+
+Signed quantization, 2L+1 levels with L = 2^(b-1)-1, at the default
+clip of 6 nats:
+
+| case | hard | 2-bit | 3-bit | 4-bit | 5-bit | 6-bit | float |
+|---|---|---|---|---|---|---|---|
+| a=0.2 clean | 40/40 | **32/40** | 40/40 | 40/40 | 40/40 | 40/40 | 40/40 |
+| a=0.6 d=50 ns | 0/40 | 0/40 | 0/40 | 2/40 | 5/40 | 10/40 | 12/40 |
+| a=0.6 d=200 ns | 0/40 | 0/40 | 0/40 | 25/40 | 40/40 | 40/40 | 40/40 |
+| a=0.6 d=500 ns | 30/40 | **0/40** | **20/40** | 40/40 | 40/40 | 40/40 | 40/40 |
+| a=0.8 d=1000 ns | 0/40 | 0/40 | 0/40 | 31/40 | 34/40 | 36/40 | 36/40 |
+| a=0.4 d=500 ns Δf=300 | 0/40 | 0/40 | 39/40 | 40/40 | 40/40 | 40/40 | 40/40 |
+
+**2-bit and 3-bit are WORSE THAN HARD DECISION** in some cells -- 2-bit
+loses the clean channel (32/40) and destroys a=0.6/500 ns (0/40 against
+hard's 30/40). A coarse LLR is not a weakened soft decoder, it is a
+harmful one. Anything sized on the assumption that low bit widths degrade
+gracefully would be wrong.
+
+### Clipping matters more than width -- but only once quantized
+
+Same 4-bit LLR, sweeping what those 15 levels SPAN:
+
+| case | clip 2 | clip 3 | clip 4 | clip 6 | clip 10 | clip 20 | float |
+|---|---|---|---|---|---|---|---|
+| a=0.6 d=50 ns | 7/40 | 4/40 | 3/40 | 2/40 | 1/40 | 0/40 | 12/40 |
+| a=0.6 d=200 ns | **40/40** | 40/40 | 38/40 | 25/40 | 0/40 | 0/40 | 40/40 |
+| a=0.6 d=500 ns | 40/40 | 40/40 | 40/40 | 40/40 | 39/40 | 0/40 | 40/40 |
+| a=0.8 d=1000 ns | 32/40 | 33/40 | 35/40 | 31/40 | 15/40 | 0/40 | 36/40 |
+| a=0.4 d=500 ns Δf=300 | 40/40 | 40/40 | 40/40 | 40/40 | 40/40 | 15/40 | 40/40 |
+
+At clip 6 the fixed-width table would have said 5 bits. At clip 2-3,
+**4 bits reaches float in three of five cells and comes within 4 frames
+on a fourth** -- so the width read off a single clip setting was one bit
+too conservative. Loose clipping is catastrophic: at clip 20 nearly
+everything quantizes onto the zero level and the information is gone.
+
+At FULL 8-bit precision the same clip sweep is flat (12/40, 40/40, 40/40,
+33-36/40, 40/40 across clip 2 to 10), so clip sensitivity is purely a
+quantization effect and the shipped default of 6.0 needs no change.
+
+### Sizing conclusion
+
+**4-bit signed LLR with a clip of 2-3 nats** is the hardware target: it
+keeps essentially all the coding gain outside the known broad-fade
+residual, at a quarter of the branch-metric width. 5-bit buys a little
+insurance. 3-bit and below must not be used -- they lose to hard decision.
+
+This is a simulation result at one SNR, one modulation and one payload,
+with the clip optimum found on the same cells it is quoted against; it
+sizes an experiment, not a design.
+
 ## What this does not establish
 
 - **Simulation only**, deterministic taps with randomized phase — no
