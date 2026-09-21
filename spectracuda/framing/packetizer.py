@@ -259,7 +259,7 @@ class Packetizer(Block):
 
         return self.fec1_codec.encode(after_fec0) if self.fec1_codec is not None else after_fec0
 
-    def decode(self, bits: Any) -> Dict[str, Any]:
+    def decode(self, bits: Any, soft: Any = None) -> Dict[str, Any]:
         """Self-contained: unlike Ofdm's own MAX_PAYLOAD_SYMBOLS/expected-
         length bookkeeping (which needs the decoded header's
         payload_len_bits to know how many OFDM symbols to gather in the
@@ -278,7 +278,14 @@ class Packetizer(Block):
         # decode failure says WHICH stage gave up, not just "FEC failed".
         if self.fec1_codec is not None:
             try:
-                after_fec1 = self.fec1_codec.decode(bits)
+                # `soft` replaces the HARD bits at fec1 only. fec1 is the
+                # inner code on receive -- it sits directly against the
+                # demapper with no deinterleaving in between -- so soft
+                # values reach it unpermuted. Everything downstream
+                # (deinterleave, fec0/RS, CRC) stays hard, because Viterbi
+                # emits hard bits regardless.
+                after_fec1 = (self.fec1_codec.decode(bits) if soft is None
+                              else self.fec1_codec.decode_soft(soft))
             except ValueError as exc:
                 raise ValueError(f"fec1 (outer, {self.fec1!r}) decode failed: {exc}") from exc
         else:

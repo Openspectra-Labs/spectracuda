@@ -1,0 +1,174 @@
+"""Soft-decision Viterbi for the inner code (fec1), opt-in via
+`Ofdm(soft_decision=True)`.
+
+Why it exists: hard-decision demodulation picks the nearest constellation
+point and returns 0/1, discarding how close the symbol was to the
+decision boundary. On a frequency-selective channel a deeply faded
+subcarrier therefore hands the decoder WRONG bits marked maximally
+confident, indistinguishable from good ones -- and measurement shows
+Viterbi then amplifies rather than corrects (raw BER 0.052 in, 0.071
+out). See docs/2026-09-21-multipath-severity-characterization.md.
+
+The central invariant, asserted below: feeding hard bits to the soft
+decoder as 0/255 returns EXACTLY the hard answer. All of the gain comes
+from graded confidence, which is why the demapper -- not the decoder --
+was the missing piece. libcorrect has shipped
+correct_convolutional_decode_soft all along.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from spectracuda.fec._native import native_available
+from spectracuda.fec.fec import FEC
+from spectracuda.fec.viterbi import ConvolutionalCode
+from spectracuda.modem import Modem
+from spectracuda.pipeline import Ofdm
+from spectracuda.sim import Channel
+
+pytestmark = pytest.mark.skipif(
+    not native_available(),
+    reason="soft-decision Viterbi is native-only (no pure-Python soft decoder)",
+)
+
+FS, N, CP = 20e6, 256, 64
+TAIL = 4096
+
+
+def make(soft, dmrs_interval=32, modem="qam16"):
+    o = Ofdm(fft_size=N, n_pilot=8, n_data=216, cp_len=CP, modem=modem,
+             fec="rs_m8", fec1="conv_v27",
+             interleaver="block", interleaver_kwargs={"unit_bits": 8},
+             crc="crc16", sync="schmidl_cox", cfo="schmidl_cox",
+             n_training_symbols=2, dmrs_interval=dmrs_interval,
+             soft_decision=soft)
+    o.MAX_PAYLOAD_SYMBOLS = 256
+    return o
+
+
+def two_path(o, bits, a, delay_ns, snr_db, seed, phase=1.1):
+    taps, dop, _ = Channel.paths_to_taps([
+        {"amplitude": 1.0, "delay_ns": 0},
+        {"amplitude": a, "delay_ns": delay_ns, "phase_rad": phase},
+    ], FS)
+    return Channel(snr_db=snr_db, multipath_taps=taps, tap_doppler_hz=dop,
+                   sample_rate_hz=FS, tail_samples=TAIL,
+                   noise_draw_len=300_000, seed=seed,
+                   backend="numpy").process(o.generate_frame(bits))
+
+
+def payload(n_bytes=5575, seed=1):
+    return np.random.default_rng(seed).integers(
+        0, 2, size=(1, n_bytes * 8)).astype("uint8")
+
+
+# -- the invariant that explains the whole design ----------------------
+
+
+def test_certain_soft_values_reproduce_the_hard_decoder_exactly():
+    """0/255 carries no more information than 0/1, so the soft decoder
+    must return the hard decoder's answer bit-for-bit. This is why
+    binding the soft entry point alone buys nothing: the demapper has to
+    stop throwing the confidence away first."""
+    c = ConvolutionalCode(backend="numpy")
+    msg = np.random.default_rng(0).integers(0, 2, size=(2, 300)).astype("uint8")
+    enc = np.asarray(c.encode(msg))
+    hard = np.asarray(c.decode(enc))
+    soft = np.asarray(c.decode_soft((enc * 255).astype("uint8")))
+    np.testing.assert_array_equal(soft, hard)
+    np.testing.assert_array_equal(soft, msg)
+
+
+# -- the soft demapper -------------------------------------------------
+
+
+@pytest.mark.parametrize("scheme", ["qpsk", "qam16"])
+def test_soft_demod_agrees_with_hard_when_noiseless(scheme):
+    m = Modem(scheme, backend="numpy")
+    bits = np.random.default_rng(0).integers(
+        0, 2, size=(1, m.bits_per_symbol * 400)).astype("uint8")
+    soft = np.asarray(m.demodulate_soft(m.modulate(bits)))
+    np.testing.assert_array_equal((soft > 127).astype("uint8"),
+                                  np.asarray(m.demodulate(m.modulate(bits))))
+
+
+def test_soft_demod_confidence_falls_with_noise():
+    """The whole point: the byte has to MOVE toward 128 as the symbol
+    approaches a decision boundary, otherwise there is nothing to weigh."""
+    m = Modem("qam16", backend="numpy")
+    rng = np.random.default_rng(0)
+    bits = rng.integers(0, 2, size=(1, 4 * 2000)).astype("uint8")
+    sym = np.asarray(m.modulate(bits))
+    clean = np.abs(np.asarray(m.demodulate_soft(sym)).astype(int) - 128).mean()
+    noisy_sym = sym + (rng.standard_normal(sym.shape)
+                       + 1j * rng.standard_normal(sym.shape)) * 0.25
+    noisy = np.abs(np.asarray(m.demodulate_soft(noisy_sym)).astype(int) - 128).mean()
+    assert clean > 120
+    assert noisy < 0.8 * clean
+
+
+def test_soft_demod_weight_lowers_confidence_on_faded_subcarriers():
+    """|H[k]|^2 weighting is what makes a deep null self-identify. Without
+    it the faded bins arrive as confident as the healthy ones."""
+    m = Modem("qam16", backend="numpy")
+    rng = np.random.default_rng(3)
+    bits = rng.integers(0, 2, size=(1, 4 * 216)).astype("uint8")
+    sym = np.asarray(m.modulate(bits)).reshape(1, 216)
+    sym = sym + (rng.standard_normal(sym.shape)
+                 + 1j * rng.standard_normal(sym.shape)) * 0.15
+    w = np.ones((1, 216))
+    w[0, :20] = 0.05                       # a deeply faded group
+    soft = np.asarray(m.demodulate_soft(sym, weight=w)).reshape(216, 4)
+    faded = np.abs(soft[:20].astype(int) - 128).mean()
+    healthy = np.abs(soft[20:].astype(int) - 128).mean()
+    assert faded < 0.5 * healthy
+
+
+# -- wiring ------------------------------------------------------------
+
+
+def test_soft_decision_defaults_off():
+    assert make(False).soft_decision is False
+    assert Ofdm(fft_size=64, n_pilot=4, n_data=40, cp_len=16,
+                modem="qpsk").soft_decision is False
+
+
+def test_rs_has_no_soft_decoder():
+    """Only the inner convolutional code can consume soft values -- it is
+    the one sitting against the demapper. RS is reached after Viterbi has
+    already emitted hard bits."""
+    with pytest.raises(NotImplementedError, match="no soft-decision"):
+        FEC("rs_m8", backend="numpy").decode_soft(np.zeros((1, 16), "uint8"))
+
+
+@pytest.mark.parametrize("soft", [False, True])
+def test_clean_channel_round_trips_either_way(soft):
+    o = make(soft)
+    bits = payload()
+    r = o.rx_process(two_path(o, bits, a=0.2, delay_ns=100, snr_db=25.0, seed=0))
+    assert bool(np.asarray(r["crc_valid"])[0])
+    np.testing.assert_array_equal(np.asarray(r["bits"])[0][: bits.shape[1]], bits[0])
+
+
+# -- the gate ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("a,delay_ns", [(0.6, 200), (0.8, 1000)])
+def test_soft_recovers_a_frame_hard_decision_loses(a, delay_ns):
+    """Strong static frequency-selective fade, no Doppler. Hard decision
+    loses these outright (phase 2 of the multipath study measured 0/300);
+    soft decision decodes them bit-exactly."""
+    bits = payload()
+    hard = make(False)
+    try:
+        r = hard.rx_process(two_path(hard, bits, a, delay_ns, 15.0, seed=9000))
+        hard_ok = bool(np.asarray(r["crc_valid"])[0])
+    except ValueError:                      # uncorrectable RS codeword
+        hard_ok = False
+    assert not hard_ok, "expected hard decision to lose this frame"
+
+    soft = make(True)
+    r = soft.rx_process(two_path(soft, bits, a, delay_ns, 15.0, seed=9000))
+    assert bool(np.asarray(r["crc_valid"])[0])
+    np.testing.assert_array_equal(np.asarray(r["bits"])[0][: bits.shape[1]], bits[0])

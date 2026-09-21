@@ -366,6 +366,22 @@ class FEC(Block):
             return self._encode_block_level(bits)
         return self._impl.encode(bits)
 
+    def decode_soft(self, soft: Any) -> Any:
+        """Soft-decision decode, delegated to the underlying scheme.
+
+        Only the convolutional schemes implement it: fec1 (the inner code
+        on receive) is the one that sits against the demapper, so it is
+        the only stage soft values can reach unpermuted. rs_m8 and the
+        LDPC variants keep their hard paths -- Viterbi emits hard bits
+        regardless, so everything downstream is unchanged.
+        """
+        if not hasattr(self._impl, "decode_soft"):
+            raise NotImplementedError(
+                f"fec scheme {self.scheme!r} has no soft-decision decoder "
+                f"(only the convolutional schemes do)"
+            )
+        return self._impl.decode_soft(soft)
+
     def decode(self, bits: Any, **kwargs: Any) -> Any:
         xp = self.xp
         if self.scheme in _SYMBOL_LEVEL_SCHEMES:

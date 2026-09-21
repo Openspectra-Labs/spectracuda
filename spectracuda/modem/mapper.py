@@ -174,6 +174,67 @@ class Modem(Block):
             return bits
         return self._demodulate_numpy(symbols)
 
+    def _point_table(self):
+        """(points, labels) for the whole constellation, built by running
+        modulate() over every bit pattern -- so the Gray mapping is never
+        written down twice and cannot drift from modulate()'s."""
+        if getattr(self, "_pt_cache", None) is None:
+            m = self.bits_per_symbol
+            labels = np.array([[(i >> (m - 1 - b)) & 1 for b in range(m)]
+                               for i in range(1 << m)], dtype="uint8")
+            pts = np.asarray(self.modulate(labels.reshape(1, -1)))[0]
+            self._pt_cache = (pts.astype("complex64"), labels)
+        return self._pt_cache
+
+    def demodulate_soft(self, symbols: Any, weight: Any = None,
+                        llr_clip: float = 6.0) -> Any:
+        """Max-log soft demodulation -> one uint8 per coded bit, in
+        libcorrect's convention (0 = certainly 0, 255 = certainly 1,
+        128 = no information).
+
+        Why this exists: demodulate() picks the nearest point and returns
+        0/1, which DESTROYS how close the symbol was to the decision
+        boundary -- and that distance is the only thing a soft decoder can
+        use. Feeding hard bits to a soft decoder as 0/255 returns exactly
+        the hard answer (asserted in tests/test_modem_soft.py).
+
+        Per bit b:   llr = min_{label_b=0}|y-s|^2 - min_{label_b=1}|y-s|^2
+        negative -> bit 0, positive -> bit 1, magnitude = confidence.
+
+        `weight` (optional, broadcast over the last axis) scales that
+        confidence per subcarrier. Pass |H[k]|^2 normalized to unit mean:
+        after equalization a faded subcarrier's noise is amplified by
+        1/|H|^2, so its bits deserve proportionally less trust. This is
+        the whole point on a frequency-selective channel -- without it a
+        deeply faded bin hands the decoder confident garbage.
+
+        The scale is self-calibrated: the mean squared distance to the
+        nearest point estimates the post-equalization noise power, so
+        llr/(2*sigma^2) is an LLR in nats and `llr_clip` nats saturates
+        the byte range.
+        """
+        xp = self.xp
+        y = xp.asarray(symbols)
+        if y.ndim == 1:
+            y = y[None, :]
+        pts, labels = self._point_table()
+        pts = xp.asarray(pts)
+        d = xp.abs(y[..., None] - pts[None, None, :]) ** 2      # (..., M)
+        sigma2 = float(xp.mean(xp.min(d, axis=-1))) or 1e-12
+        m = self.bits_per_symbol
+        out = xp.empty(y.shape + (m,), dtype="float32")
+        for b in range(m):
+            zero = xp.asarray(np.flatnonzero(labels[:, b] == 0))
+            one = xp.asarray(np.flatnonzero(labels[:, b] == 1))
+            out[..., b] = xp.min(d[..., zero], axis=-1) - xp.min(d[..., one], axis=-1)
+        llr = out / (2.0 * sigma2)
+        if weight is not None:
+            w = xp.asarray(weight)
+            llr = llr * w[..., None]
+        llr = xp.clip(llr / llr_clip, -1.0, 1.0)
+        soft = xp.clip(xp.round(128.0 + 127.0 * llr), 0, 255).astype("uint8")
+        return soft.reshape(y.shape[0], -1)
+
     def demodulate_stats(self, symbols: Any) -> Tuple[Any, Any, Any]:
         """demodulate() plus the two per-row power sums EVM is built from:
         (bits, sum |symbol - nearest_point|^2, sum |nearest_point|^2), each

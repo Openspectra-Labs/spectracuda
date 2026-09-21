@@ -301,6 +301,7 @@ class Ofdm(Block):
         sync_threshold: Optional[float] = None,
         strict_fec_check: bool = False,
         timing_advance: Optional[int] = None,
+        soft_decision: bool = False,
     ) -> None:
         if fec != "none" and fec not in _FEC_SCHEME_CODES:
             raise ValueError(
@@ -373,6 +374,21 @@ class Ofdm(Block):
                 f"channel's delay spread -- see the comment above."
             )
         self.timing_advance = int(timing_advance)
+        # Soft-decision Viterbi for the inner code (fec1). OFF by default,
+        # and when off NOTHING on the hot path changes -- no extra demod
+        # pass, no extra array, the hard branch is byte-for-byte what it
+        # was. That matters because the RX chain is already time-tight.
+        #
+        # When ON it costs a second demodulation (a max-log LLR over the
+        # constellation) AND forfeits the accelerated Viterbi kernel:
+        # libcorrect has no `fast`/`neon` SOFT decoder, so soft decode
+        # always runs the portable loop. Buy it only where the coding gain
+        # is worth that -- see
+        # docs/2026-09-21-multipath-severity-characterization.md, where
+        # hard-decision Viterbi AMPLIFIES errors on frequency-contiguous
+        # fades because faded subcarriers arrive marked maximally
+        # confident.
+        self.soft_decision = bool(soft_decision)
         if iq_dtype not in ("float16", "float32"):
             raise ValueError(
                 f"iq_dtype={iq_dtype!r}; expected 'float16' or 'float32' "
@@ -1751,6 +1767,29 @@ class Ofdm(Block):
         # still real, meaningful EVM data, just not real FEC codeword bits.)
         encoded_bits = encoded_bits[:, :encoded_bit_count]
 
+        # Soft values for fec1, built from the SAME equalized symbols the
+        # hard bits came from. Weighted by |H[k]|^2 normalized to unit
+        # mean: after equalization a faded subcarrier's noise is amplified
+        # by 1/|H|^2, so its bits must arrive less trusted. Without that
+        # weighting a deep null hands the decoder confident garbage, which
+        # is exactly the measured failure mode.
+        soft_bits = None
+        if self.soft_decision:
+            # equalized_combined is already the MAIN-payload slice by here
+            # (the C2 rows were split off above), so h_hat_combined has to
+            # be sliced the same batch-major/symbol-minor way to stay
+            # row-aligned with it.
+            w = xp.abs(h_hat_combined) ** 2
+            w = w / xp.mean(w)
+            if n_c2:
+                w = w.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
+                    n_batch * n_payload_symbols, -1
+                )
+            soft_payload = payload_modem.demodulate_soft(equalized_combined, weight=w)
+            soft_bits = soft_payload.reshape(
+                n_batch, n_payload_symbols * bits_per_symbol_payload
+            )[:, :encoded_bit_count]
+
         # FEC-decode then CRC-strip+check, delegated to payload_packetizer
         # (may raise ValueError if a codeword has more errors than the
         # decoded fec0 scheme can correct -- see FEC.decode()/the
@@ -1758,7 +1797,7 @@ class Ofdm(Block):
         # crc="none" (nothing to check), else a per-batch-item bool array
         # so the caller decides what to do (retry, drop, log) -- never
         # raised as an exception, matching liquid's crc_validate_message.
-        decode_result = payload_packetizer.decode(encoded_bits)
+        decode_result = payload_packetizer.decode(encoded_bits, soft=soft_bits)
         raw_bits = decode_result["bits"]
         crc_valid = decode_result["crc_valid"]
 

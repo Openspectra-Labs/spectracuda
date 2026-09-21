@@ -197,6 +197,20 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
     lib.correct_convolutional_decode.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8)
     ]
+    # Soft-decision decode. Already present in every build we compile (the
+    # "fast" and SSE .so files export it too, since they add their kernel
+    # on top of the full libcorrect source) -- so this is a binding, not
+    # new C. Takes ONE BYTE PER BIT rather than packed bits: 0 = certainly
+    # 0, 255 = certainly 1, 128 = erasure (include/correct.h).
+    #
+    # There is no `fast` or `neon` soft kernel, so soft decode always runs
+    # the portable add-compare-select loop even when the hard path would
+    # have used an accelerated one. That is a throughput decision, which
+    # is why it is opt-in -- see Ofdm(soft_decision=...).
+    lib.correct_convolutional_decode_soft.restype = ctypes.c_ssize_t
+    lib.correct_convolutional_decode_soft.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8)
+    ]
     lib.correct_reed_solomon_create.restype = ctypes.c_void_p
     lib.correct_reed_solomon_create.argtypes = [ctypes.c_uint16, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_size_t]
     # batched entry points (src/reed-solomon/batch.c, spectracuda's own)
@@ -639,6 +653,29 @@ class NativeConvolutional:
     def decode(self, bits: np.ndarray) -> np.ndarray:
         bits = np.asarray(bits, dtype="uint8")
         return np.stack([self._decode_one(bits[b]) for b in range(bits.shape[0])])
+
+    def _decode_soft_one(self, soft: np.ndarray) -> np.ndarray:
+        # Same withheld-trailing-bits workaround as _decode_one -- the soft
+        # entry point shares libcorrect's history_buffer/bit_writer code, so
+        # it withholds identically. Padding is 0 (a CERTAIN zero bit), which
+        # is the soft-domain spelling of the zero bits the hard path appends.
+        T = len(soft) // 2
+        k = T - _TAIL_BITS
+        padded = np.concatenate([soft, np.zeros(2 * _DECODE_PAD_PAIRS, dtype="uint8")])
+        Tp = T + _DECODE_PAD_PAIRS
+        msg_out = (ctypes.c_uint8 * (Tp // 8 + 8))()
+        n_written = _lib.correct_convolutional_decode_soft(
+            self._conv,
+            padded.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            2 * Tp, msg_out,
+        )
+        decoded = np.unpackbits(np.frombuffer(bytes(msg_out[: max(n_written, 0)]), dtype="uint8"))
+        return decoded[:k].astype("uint8")
+
+    def decode_soft(self, soft: np.ndarray) -> np.ndarray:
+        """soft: (n_batch, 2*(k+6)) uint8, one byte per coded bit."""
+        soft = np.ascontiguousarray(soft, dtype="uint8")
+        return np.stack([self._decode_soft_one(soft[b]) for b in range(soft.shape[0])])
 
 
 class NativeConvolutionalSSE:

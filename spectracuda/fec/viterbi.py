@@ -171,6 +171,7 @@ class ConvolutionalCode(Block):
         # backend directly, dispatch aside).
         self._forced_backend = os.environ.get("SPECTRACUDA_VITERBI_BACKEND", "").strip().lower()
         self._native = self._select_native_backend(self._forced_backend) if self.backend == "numpy" else None
+        self._native_soft = None  # lazily created portable instance for decode_soft()
 
         # TX side: a one-pass Numba encoder over the unpacked bit arrays
         # (fec/_numba_conv_encode.py) replaces the native encoder's
@@ -300,6 +301,38 @@ class ConvolutionalCode(Block):
         encoded[:, 0::2] = out1_seq
         encoded[:, 1::2] = out2_seq
         return encoded
+
+    def decode_soft(self, soft: Any) -> Any:
+        """Soft-decision Viterbi. `soft` is (n_batch, 2*(k+6)) uint8, one
+        byte per coded bit in libcorrect's convention (0 = certainly 0,
+        255 = certainly 1, 128 = erasure) -- see Modem.demodulate_soft().
+
+        Native-only by design. libcorrect exports decode_soft from every
+        build we compile, but there is no `fast` or `neon` SOFT kernel, so
+        this runs the portable add-compare-select loop even where the hard
+        path would use an accelerated one. Writing a second, unaccelerated
+        pure-Python soft decoder as a fallback would add an implementation
+        to verify for no benefit, so an unavailable native backend raises
+        here rather than silently degrading.
+        """
+        # The accelerated classes (fast/sse/neon/hexagon) have no soft
+        # kernel, and their conv handles are DIFFERENT structs -- a
+        # correct_convolutional_fast* cannot be passed to
+        # correct_convolutional_decode_soft(). So soft decode keeps its own
+        # portable instance, created once on first use. This is the concrete
+        # cost of soft decision today: it forfeits whatever the hard path's
+        # accelerated kernel was buying.
+        if self._native_soft is None:
+            if not native_available():
+                raise RuntimeError(
+                    "soft-decision Viterbi needs the native libcorrect "
+                    "backend (there is no pure-Python soft decoder)"
+                )
+            self._native_soft = NativeConvolutional()
+        soft = np.asarray(soft, dtype="uint8")
+        if soft.ndim == 1:
+            soft = soft[None, :]
+        return self.xp.asarray(self._native_soft.decode_soft(soft))
 
     def decode(self, bits: Any) -> Any:
         xp = self.xp
