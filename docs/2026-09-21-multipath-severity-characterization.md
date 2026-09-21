@@ -1,0 +1,204 @@
+# Multipath severity: what actually breaks, and why
+
+**Status: characterization complete, 2026-09-21. Simulation only.**
+No PHY change was made to obtain these results. The soft-decision work
+that followed from them is opt-in and off by default — see the last
+section.
+
+Reproduce with `examples/multipath_stress_study.py` (`--phase 2|3|4`),
+`examples/multipath_phase5_diagnosis.py`, and
+`examples/multipath_stress_report.py`. Raw JSON and rendered tables in
+`debug/multipath_stress/`.
+
+Reference PHY throughout: 20 MSps, `fft_size=256`, `cp_len=64`
+(320-sample symbol = 16.0 µs, 78.125 kHz spacing — the 802.11ax
+numerology), 16QAM, 15 dB, 8 pilots, 2 training symbols,
+`timing_advance=2`, 5575 B, `rs_m8` + block interleaver + `conv_v27`,
+DMRS `iv=32` unless stated. CP is 3.2 µs, so every delay used is well
+inside it.
+
+**Delay quantization is exact.** At 20 MSps one sample is 50 ns, so
+50/100/200/500/1000 ns are 1/2/4/10/20 samples with no rounding.
+
+## Three mechanisms, kept apart
+
+| mechanism | isolated by |
+|---|---|
+| static frequency-selective fade | running `delta_f = 0` first |
+| time-varying multipath (ageing) | adding differential Doppler at fixed fade |
+| sync/acquisition failure | counting undetected frames separately from CRC failure |
+
+## 1. A single echo breaks the link with nothing ageing
+
+Packet success of 300, `delta_f = 0`:
+
+| echo a | 50 ns | 100 ns | 200 ns | 500 ns | 1000 ns |
+|---|---|---|---|---|---|
+| 0.2 | 300 | 300 | 300 | 300 | 300 |
+| 0.4 | 298 | 300 | 300 | 300 | 300 |
+| **0.6** | **0** | **0** | **0** | **202** | **284** |
+| 0.8 | 0 | 0 | 0 | 0 | 1 |
+| 1.0 | 0 | 0 | 0 | 0 | 0 |
+
+The threshold is between a=0.4 and a=0.6 — i.e. **7.4 dB of fade is
+survivable, 12.0 dB is not**.
+
+## 2. Short delays are the damaging ones
+
+Counter-intuitive but unambiguous. Null **depth** is
+`20·log₁₀((1+a)/(1−a))` and depends on amplitude alone — identical at
+every delay:
+
+| a | null depth | \|H\| range | EVM @ deep decile | EVM @ peak decile |
+|---|---|---|---|---|
+| 0.2 | 3.5 dB | 0.800–1.200 | 0.307 | 0.278 |
+| 0.4 | 7.4 dB | 0.600–1.400 | 0.351 | 0.278 |
+| 0.6 | 12.0 dB | 0.400–1.600 | 0.477 | 0.279 |
+| 0.8 | 19.1 dB | 0.200–1.800 | 0.794 | 0.275 |
+| 1.0 | ~50 dB | 0.006–2.000 | 0.926 | 0.275 |
+
+What delay changes is how many nulls span the band, hence how **wide**
+each one is. A 1-sample echo puts one broad null across 256 bins; a
+20-sample echo puts twenty narrow ones.
+
+**Failures track the nulls.** EVM at the healthy decile is flat at ~0.27
+regardless of `a` — healthy subcarriers never degrade. Correlation
+between per-subcarrier EVM and |H| runs −0.31 to −0.61 throughout.
+
+**The channel estimator is not the problem.** Its normalized shape error
+against the analytic `H[k] = 1 + a·e^{−j2πkδ/N+jφ}` is 0.064–0.072 and no
+worse in the faded bins than elsewhere.
+
+> **Methodology note.** These statistics are computed per frame against
+> that frame's own nulls and only then averaged. The echo phase is
+> redrawn every frame, so averaging the *spectra* first erases the nulls
+> — an a=1.0 channel then reports a 3 dB ripple with min|H| = 1.000,
+> which is impossible. The first version of this analysis made exactly
+> that mistake.
+
+## 3. It is Viterbi that breaks, not the demapper
+
+Same echo amplitude, same ~16% of band faded, same raw demapper BER, no
+Doppler — only fragmentation differs:
+
+| delay | faded regions | widest | pre-Vit BER | post-Vit BER | RS min/mean/max | over 16 | pass |
+|---|---|---|---|---|---|---|---|
+| 50 ns | 1.1 | 36 bins | 0.0517 | **0.0706** ← amplified | 9 / 37.8 / 69 | 99% | 0/12 |
+| 200 ns | 3.8 | 10 bins | 0.0478 | 0.0345 | 7 / 22.7 / 40 | 87% | 0/12 |
+| 1000 ns | 17.7 | 2 bins | 0.0487 | **0.0044** | 0 / 2.9 / 17 | 0% | 11/12 |
+
+The demapper delivers identical damage in all three. With one wide null
+Viterbi **amplifies**; with eighteen narrow ones it corrects cleanly.
+
+**The interleaver cannot help, structurally.** TX is
+`RS → interleaver → conv`, so RX is `Viterbi → deinterleave → RS`: the
+interleaver sits *after* Viterbi and spreads Viterbi's output across RS
+codewords. It never shields Viterbi from a channel burst. At 50 ns even
+the *best* RS codeword carries 9 errors — the deinterleaver faithfully
+spread a hopeless Viterbi output evenly rather than leaving some clean.
+
+Error clustering is measured as peak local **density** over a one-symbol
+window, not run length: a faded subcarrier raises error probability
+rather than forcing every bit wrong, so even badly faded regions give
+short runs (max 4–5 bits) and run length cannot separate clustered from
+uniform damage.
+
+## 4. Ageing vs fade: DMRS only helps one of them
+
+`iv=32` vs `iv=16`, 300 frames:
+
+| a | delay | Δf | iv=32 | iv=16 | verdict |
+|---|---|---|---|---|---|
+| 0.4 | 200 ns | 300 | 0/300 | 190/300 | ageing |
+| 0.4 | 500 ns | 300 | 0/300 | **300/300** | ageing, fully rescued |
+| 0.6 | 200 ns | 100 | 0/300 | 0/300 | fade |
+| 0.6 | 500 ns | 100 | 3/300 | 68/300 | improved, not rescued |
+| 0.8 | any | any | 0/300 | 0/300 | fade |
+
+At a=0.4 it is ageing and a faster refresh fixes it; at a≥0.6 it is a
+fade and refresh changes nothing. a=0.4 fails at `iv=32` where a=0.2
+passed in the earlier Doppler study, matching
+`|ΔH| = 2a·|sin(π·Δf·ΔT)|` scaling linearly in `a`.
+
+## 5. Sync holds, but acquisition does not always
+
+`start_index` moves toward late as echoes strengthen (45% late at a=0.2,
+92% at a=1.0) but **never exceeds 1 sample**, so `timing_advance=2`
+remains sufficient. Separately, at a=1.0 / 50 ns **20.7% of frames are
+never detected at all** — an acquisition failure, not a window-placement
+one.
+
+## 6. Randomized multi-tap ensembles
+
+120 channels × 20 frames, LOS 1.0 plus 2–5 reflections (amplitude 0.1–0.8
+uniform, delay 50–1000 ns on the 50 ns grid, uniform phase, differential
+Doppler ±300 Hz):
+
+- `iv=32`: median PER 100%, **8/120 (7%) fully clean**
+- `iv=16`: median PER 100%, **9/120 (8%) fully clean**
+
+This is a deliberately harsh draw — median strongest-echo/LOS is 0.64, so
+half the ensemble starts past the a≈0.6 cliff. It characterizes that
+distribution, not real UAV channels.
+
+**The important finding: "strongest echo / LOS" is the wrong severity
+metric.** Several moderate echoes add coherently at the worst subcarrier,
+so composite null depth outruns any individual amplitude:
+
+```
+channel 6:  0.318 @300ns, 0.396 @450ns  -- no echo above 0.40
+            composite null 15.0 dB      -> 100% PER
+channel 58: 0.368 @50ns,  0.431 @250ns
+            composite null 17.0 dB      -> 100% PER
+```
+
+A single 0.4 echo is 7.4 dB and passes; a single 0.6 echo is 12.0 dB and
+fails. **Severity should be judged from composite |H| null depth, not
+from the largest tap.**
+
+## 7. Soft-decision Viterbi recovers most of this
+
+The diagnosis above pointed at one specific information loss: hard
+demodulation returns 0/1 and discards how close the symbol was to the
+decision boundary, so a faded subcarrier hands the decoder wrong bits
+marked *maximally confident*. That was implemented as an opt-in flag —
+`Ofdm(soft_decision=True)`, see `tests/test_soft_decision.py`.
+
+40 frames/cell, same seeds as above:
+
+| case | hard | soft |
+|---|---|---|
+| a=0.2 clean | 40/40 | 40/40 |
+| a=0.6 d=50 ns | 0/40 | 12/40 |
+| a=0.6 d=200 ns | 0/40 | **40/40** |
+| a=0.6 d=500 ns | 30/40 | **40/40** |
+| a=0.8 d=1000 ns | 0/40 | **36/40** |
+| a=0.4 d=500 ns Δf=300 | 0/40 | **40/40** |
+
+Note the last row: it previously required `iv=16` to survive, and soft
+decision rescues it at `iv=32` — retaining the lower DMRS overhead.
+
+The a=0.6 / 50 ns case remains largely unrecovered, and that is
+informative rather than disappointing: one broad null removes too much
+contiguous coded information for any amount of confidence weighting to
+reconstruct. **That is the residual regime — broad, deep fades — and it
+is where diversity or a stronger code, not reliability weighting, would
+be the lever.**
+
+Cost, measured on a clean frame both paths decode successfully:
+`rx_process` median **1.9 ms → 12.8 ms (6.6×)**, splitting roughly evenly
+between an unoptimized soft demapper (0.13 → 2.80 ms, no numba kernel
+where the hard path has one) and the forfeited accelerated Viterbi (0.42
+→ 3.18 ms, since libcorrect has no `fast`/`neon` soft kernel). Roughly
+half is removable without touching C. Timings are WSL2 medians on a noisy
+machine — indicative, not a spec.
+
+## What this does not establish
+
+- **Simulation only**, deterministic taps with randomized phase — no
+  fading process, no angle-of-arrival geometry, no standards channel
+  model. The Pi/Pluto gate named in the PHY specification is untouched.
+- **One SNR (15 dB), one payload, one modulation.** Integer-sample delays
+  only; fractional delay is unsupported and not faked.
+- The randomized ensemble's amplitude range is a **stress draw**, chosen
+  to find the cliff, not to represent a deployment.

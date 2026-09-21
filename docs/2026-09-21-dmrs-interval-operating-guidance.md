@@ -85,6 +85,29 @@ record: 20 MSps with `fft=256`/`cp=64` is exactly the 802.11ax numerology
 (78.125 kHz subcarrier spacing, 12.8 us symbol, 3.2 us CP = 11ax's long
 guard interval), and it halves frame airtime.
 
+## Soft-decision Viterbi changes part of this picture
+
+Soft-decision Viterbi has been experimentally demonstrated **in
+simulation** to substantially improve resistance to frequency-selective
+multipath. In characterized 20 MSps / 16QAM / 15 dB cases, several
+channels that produced complete packet loss with hard decisions recovered
+completely or nearly completely with soft decisions. Extremely broad or
+deep fades remain problematic. The current software implementation is
+unoptimized and incurs substantial CPU cost, so soft decoding remains
+optional pending optimization and a quantized-LLR / FPGA cost evaluation.
+
+`Ofdm(soft_decision=True)`, **off by default** — which is the correct
+engineering choice until that optimization and quantization work is
+finished. See
+`docs/2026-09-21-multipath-severity-characterization.md` §7.
+
+One consequence worth noting for the table above: the a=0.4 / 500 ns /
+300 Hz case previously needed `iv=16` to survive and is recovered by soft
+decision at `iv=32`. If soft decision is eventually enabled, some of the
+high-mobility interval choices may be revisitable at lower DMRS overhead
+— but that has not been characterized across the interval matrix and the
+table above stands unchanged for hard-decision operation.
+
 ## What this guidance does not establish
 
 - **No hardware validation.** Every number is simulation against a single
