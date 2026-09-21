@@ -1,0 +1,20 @@
+[
+ {
+  "depth": "none",
+  "geometry": "-",
+  "max_run": 144,
+  "mean_run": 144.0
+ },
+ {
+  "depth": "symbol",
+  "geometry": "27x32",
+  "max_run": 6,
+  "mean_run": 5.333333333333333
+ },
+ {
+  "depth": "frame",
+  "geometry": "12x8501",
+  "max_run": 12,
+  "mean_run": 12.0
+ }
+]
