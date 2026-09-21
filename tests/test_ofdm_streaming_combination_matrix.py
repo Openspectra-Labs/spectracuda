@@ -63,7 +63,14 @@ CHUNK_SIZE = 97
 
 def _make_ofdm(fft_size, modem, fec, sync="schmidl_cox", cfo="schmidl_cox", n_training_symbols=1):
     cfg = FFT_CONFIGS[fft_size]
+    # interleaver2 pinned off: these cells are single-seed,
+    # single-frame, bit-exact assertions at the EDGE of decodability
+    # (qam64 + LDPC at 20 dB with 3-tap multipath and cfo). Any
+    # change to the bit -> subcarrier mapping tips them, so the
+    # mapping is pinned to keep this a test of the fec/modem
+    # combination rather than of interleaver geometry.
     return Ofdm(
+        interleaver2="none",
         fft_size=fft_size,
         modem=modem,
         fec=fec,

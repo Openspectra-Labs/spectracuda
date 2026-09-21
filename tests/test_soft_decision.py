@@ -36,13 +36,13 @@ FS, N, CP = 20e6, 256, 64
 TAIL = 4096
 
 
-def make(soft, dmrs_interval=32, modem="qam16"):
+def make(soft, dmrs_interval=32, modem="qam16", interleaver2="block"):
     o = Ofdm(fft_size=N, n_pilot=8, n_data=216, cp_len=CP, modem=modem,
              fec="rs_m8", fec1="conv_v27",
              interleaver="block", interleaver_kwargs={"unit_bits": 8},
              crc="crc16", sync="schmidl_cox", cfo="schmidl_cox",
              n_training_symbols=2, dmrs_interval=dmrs_interval,
-             soft_decision=soft)
+             soft_decision=soft, interleaver2=interleaver2)
     o.MAX_PAYLOAD_SYMBOLS = 256
     return o
 
@@ -128,10 +128,16 @@ def test_soft_demod_weight_lowers_confidence_on_faded_subcarriers():
 # -- wiring ------------------------------------------------------------
 
 
-def test_soft_decision_defaults_off():
-    assert make(False).soft_decision is False
+def test_soft_decision_defaults_on():
+    """ON by default as of the multipath work. `soft_decision_active`
+    reports what actually happened -- it falls back to hard decision when
+    no native soft decoder is present, because a default cannot raise on a
+    machine without the compiled library."""
     assert Ofdm(fft_size=64, n_pilot=4, n_data=40, cp_len=16,
-                modem="qpsk").soft_decision is False
+                modem="qpsk").soft_decision is True
+    assert make(False).soft_decision is False
+    o = Ofdm(fft_size=64, n_pilot=4, n_data=40, cp_len=16, modem="qpsk")
+    assert o.soft_decision_active is native_available() or o.soft_decision_active is True
 
 
 def test_rs_has_no_soft_decoder():
@@ -160,7 +166,10 @@ def test_soft_recovers_a_frame_hard_decision_loses(a, delay_ns):
     loses these outright (phase 2 of the multipath study measured 0/300);
     soft decision decodes them bit-exactly."""
     bits = payload()
-    hard = make(False)
+    # interleaver2 pinned off on BOTH sides: it is on by default now and
+    # recovers these frames by itself, which would mask what this test is
+    # about -- soft decision's own contribution.
+    hard = make(False, interleaver2="none")
     try:
         r = hard.rx_process(two_path(hard, bits, a, delay_ns, 15.0, seed=9000))
         hard_ok = bool(np.asarray(r["crc_valid"])[0])
@@ -168,7 +177,7 @@ def test_soft_recovers_a_frame_hard_decision_loses(a, delay_ns):
         hard_ok = False
     assert not hard_ok, "expected hard decision to lose this frame"
 
-    soft = make(True)
+    soft = make(True, interleaver2="none")
     r = soft.rx_process(two_path(soft, bits, a, delay_ns, 15.0, seed=9000))
     assert bool(np.asarray(r["crc_valid"])[0])
     np.testing.assert_array_equal(np.asarray(r["bits"])[0][: bits.shape[1]], bits[0])

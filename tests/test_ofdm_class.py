@@ -176,7 +176,10 @@ def test_fec_rs_m8_end_to_end_identity_channel():
     # rs_m8's block size (1784 raw bits) needs n_data*bits_per_symbol to
     # divide its encoded length (2040 bits) evenly -- n_data=204 at QPSK
     # gives bits_per_ofdm_symbol=408, and 2040/408=5 exactly.
-    ofdm = Ofdm(fft_size=256, n_pilot=6, n_data=204, cp_len=32, modem="qpsk", fec="rs_m8", backend="numpy")
+    # interleaver2 pinned off -- see the two-stage test above for why:
+    # confined injected bursts are precisely what it disperses.
+    ofdm = Ofdm(fft_size=256, n_pilot=6, n_data=204, cp_len=32, modem="qpsk",
+                fec="rs_m8", interleaver2="none", backend="numpy")
     rng = np.random.default_rng(0)
     raw_bits = rng.integers(0, 2, size=(1, ofdm.fec_codec.k_bits)).astype("uint8")
     tx_iq = ofdm.generate_frame(raw_bits)
@@ -278,8 +281,13 @@ def test_two_stage_fec_corrects_errors_that_would_defeat_inner_alone():
     after conv_v27 (inner) decodes, proving the outer stage is doing
     genuine work here, not redundant with what the inner stage would
     have handled unaided."""
+    # interleaver2 pinned off: this test injects errors at fixed WIRE
+    # positions to build a deliberately CONFINED burst, and the frequency
+    # interleaver scatters exactly such a burst -- which is its job. What
+    # is under test is the two-stage FEC, not the interleaver.
     ofdm = Ofdm(fft_size=256, n_pilot=8, n_data=216, cp_len=32, modem="bpsk",
-                fec="conv_v27", fec1="ldpc_648_r12", backend="numpy")
+                fec="conv_v27", fec1="ldpc_648_r12", interleaver2="none",
+                backend="numpy")
     rng = np.random.default_rng(0)
     raw_bits = rng.integers(0, 2, size=(1, 156)).astype("uint8")
     bit_positions_to_flip = np.arange(0, 40, 3)
@@ -320,7 +328,10 @@ def test_fec_conv_v27_batched_with_different_content_per_item(n_batch):
 
 
 def test_fec_rs_m8_batched_with_different_content_per_item():
-    ofdm = Ofdm(fft_size=256, n_pilot=6, n_data=204, cp_len=32, modem="qpsk", fec="rs_m8", backend="numpy")
+    # interleaver2 pinned off -- see the two-stage test above for why:
+    # confined injected bursts are precisely what it disperses.
+    ofdm = Ofdm(fft_size=256, n_pilot=6, n_data=204, cp_len=32, modem="qpsk",
+                fec="rs_m8", interleaver2="none", backend="numpy")
     rng = np.random.default_rng(0)
     n_batch = 4
     raw_bits = rng.integers(0, 2, size=(n_batch, ofdm.fec_codec.k_bits)).astype("uint8")
@@ -371,7 +382,10 @@ def test_fec_rs_m8_corrects_deterministic_confined_byte_errors_within_ofdm_pipel
     public modem/grid/mod attributes to reconstruct that one symbol --
     not a channel impairment, so the error count is exact, not
     statistical."""
-    ofdm = Ofdm(fft_size=256, n_pilot=6, n_data=204, cp_len=32, modem="qpsk", fec="rs_m8", backend="numpy")
+    # interleaver2 pinned off -- see the two-stage test above for why:
+    # confined injected bursts are precisely what it disperses.
+    ofdm = Ofdm(fft_size=256, n_pilot=6, n_data=204, cp_len=32, modem="qpsk",
+                fec="rs_m8", interleaver2="none", backend="numpy")
     rng = np.random.default_rng(0)
     raw_bits = rng.integers(0, 2, size=(1, ofdm.fec_codec.k_bits)).astype("uint8")
     tx_iq = ofdm.generate_frame(raw_bits)

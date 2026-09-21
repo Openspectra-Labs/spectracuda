@@ -284,8 +284,21 @@ class Packetizer(Block):
                 # values reach it unpermuted. Everything downstream
                 # (deinterleave, fec0/RS, CRC) stays hard, because Viterbi
                 # emits hard bits regardless.
-                after_fec1 = (self.fec1_codec.decode(bits) if soft is None
-                              else self.fec1_codec.decode_soft(soft))
+                # Soft values only mean anything to a convolutional fec1
+                # -- it is the inner code on receive, sitting against the
+                # demapper. Any other scheme (LDPC, RS, none) falls back
+                # to the hard bits rather than raising: soft_decision is a
+                # DEFAULT now, and fec1 is resolved from the DECODED
+                # header, so the scheme is not known until this point and
+                # a caller cannot gate on it in advance.
+                use_soft = soft is not None and hasattr(self.fec1_codec, "decode_soft")
+                if use_soft:
+                    try:
+                        after_fec1 = self.fec1_codec.decode_soft(soft)
+                    except NotImplementedError:
+                        use_soft = False
+                if not use_soft:
+                    after_fec1 = self.fec1_codec.decode(bits)
             except ValueError as exc:
                 raise ValueError(f"fec1 (outer, {self.fec1!r}) decode failed: {exc}") from exc
         else:

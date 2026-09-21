@@ -1,5 +1,7 @@
 """`interleaver2`: the INNER (frequency) interleaver, between fec1 and the
-mapper on transmit, un-permuted before Viterbi on receive. Off by default.
+mapper on transmit, un-permuted before Viterbi on receive. ON by default
+as of the multipath work -- which makes it a WIRE-FORMAT change: a build
+with it on cannot talk to one without it. `interleaver2="none"` opts out.
 
 This is a different stage from `interleaver=`, not a second copy of it:
 
@@ -30,7 +32,7 @@ from spectracuda.sim import Channel
 FS, TAIL = 20e6, 4096
 
 
-def make(interleaver2="none", soft=False, dmrs_interval=32):
+def make(interleaver2="block", soft=False, dmrs_interval=32):
     o = Ofdm(fft_size=256, n_pilot=8, n_data=216, cp_len=64, modem="qam16",
              fec="rs_m8", fec1="conv_v27",
              interleaver="block", interleaver_kwargs={"unit_bits": 8},
@@ -57,12 +59,15 @@ def payload(n_bytes=5575, seed=1):
         0, 2, size=(1, n_bytes * 8)).astype("uint8")
 
 
-def test_defaults_off():
-    """The wire format must not move unless a caller asks for it: this
-    changes the ORDER bits go out in, so both ends have to agree."""
-    assert make().interleaver2 == "none"
+def test_defaults_on():
+    """ON by default as of the multipath work. This changes the ORDER bits
+    go out in, so it is a wire-format break: a build with it on cannot
+    talk to one without it, and `interleaver2="none"` is the opt-out."""
+    assert make().interleaver2 == "block"
     assert Ofdm(fft_size=64, n_pilot=4, n_data=40, cp_len=16,
-                modem="qpsk").interleaver2 == "none"
+                modem="qpsk").interleaver2 == "block"
+    assert Ofdm(fft_size=64, n_pilot=4, n_data=40, cp_len=16, modem="qpsk",
+                interleaver2="none").interleaver2 == "none"
 
 
 @pytest.mark.parametrize("interleaver2", ["none", "block"])

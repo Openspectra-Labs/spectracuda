@@ -107,6 +107,16 @@ _PHY_KWARGS = dict(
     fec="rs_m8", fec1="conv_v27", interleaver="block", interleaver_kwargs={"unit_bits": 8},
     crc="crc16", sync="schmidl_cox", cfo="schmidl_cox", channel_estimator="ls", equalizer="mmse",
     n_training_symbols=2, backend="numpy",
+    # interleaver2 pinned off: these tests assert a specific MCS
+    # DOWNSHIFT under a calibrated channel, and the frequency
+    # interleaver makes the link robust enough that the downshift no
+    # longer happens (measured: stays at qam64 where this expects
+    # qam16). What is under test is the adaptation logic, not the
+    # PHY's multipath robustness, so the PHY is pinned to what the
+    # thresholds were calibrated against. soft_decision likewise -- it is
+    # on by default now and independently keeps the link above the
+    # fallback threshold.
+    interleaver2="none", soft_decision=False,
 )
 _FRAMES_PER_ROUND = 30  # matches the calibration sweep in adaptive_mcs.py's docstring
 

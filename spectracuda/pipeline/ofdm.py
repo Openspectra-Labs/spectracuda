@@ -301,10 +301,10 @@ class Ofdm(Block):
         sync_threshold: Optional[float] = None,
         strict_fec_check: bool = False,
         timing_advance: Optional[int] = None,
-        soft_decision: bool = False,
+        soft_decision: bool = True,
         soft_llr_bits: Optional[int] = None,
         soft_llr_clip: float = 6.0,
-        interleaver2: str = "none",
+        interleaver2: str = "block",
         interleaver2_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         if fec != "none" and fec not in _FEC_SCHEME_CODES:
@@ -392,7 +392,21 @@ class Ofdm(Block):
         # hard-decision Viterbi AMPLIFIES errors on frequency-contiguous
         # fades because faded subcarriers arrive marked maximally
         # confident.
+        # DEFAULT ON. Falls back to hard decision when no native soft
+        # decoder is present, rather than raising: this is a default now,
+        # so a machine without the compiled libcorrect must still work.
+        # Same transparent-acceleration contract the FEC/CRC/sync backends
+        # already follow. `soft_decision_active` says what actually
+        # happened, so a caller can tell a fallback from a choice.
         self.soft_decision = bool(soft_decision)
+        self.soft_decision_active = self.soft_decision
+        if self.soft_decision:
+            try:
+                from ..fec._native import native_available, sse_available
+                if not (native_available() or sse_available()):
+                    self.soft_decision_active = False
+            except Exception:
+                self.soft_decision_active = False
         # LLR quantization (signed bits) and clipping range. None = full
         # 8-bit. Both are hardware-sizing knobs: an FPGA Viterbi's
         # branch-metric and path-metric widths follow from the first, and
@@ -1513,20 +1527,30 @@ class Ofdm(Block):
             )
         return self._interleaver2_cache[n_bits]
 
-    def _apply_interleaver2(self, flat: Any, encode: bool) -> Any:
+    def _apply_interleaver2(self, flat: Any, encode: bool, block: int = 0) -> Any:
         """Permute (or un-permute) within each OFDM symbol's coded bits.
 
-        `flat` is (n_batch, n_symbols * bits_per_ofdm_symbol) and already
-        padded to whole symbols, so it reshapes exactly. Operating on the
-        rows rather than the whole stream is what makes this a FREQUENCY
-        interleaver: one row is one OFDM symbol, and bit i of a row lands
-        on subcarrier i // bits_per_symbol.
+        `flat` is (n_batch, n_symbols * block) and already padded to whole
+        symbols, so it reshapes exactly. Operating on the rows rather than
+        the whole stream is what makes this a FREQUENCY interleaver: one
+        row is one OFDM symbol, and bit i of a row lands on subcarrier
+        i // bits_per_symbol.
+
+        `block` MUST be the per-OFDM-symbol bit count of the modem that
+        actually carried the payload. On receive that is the modem decoded
+        from the HEADER, not `self.modem` -- a receiver may be configured
+        differently from the transmitter (see
+        tests/test_ofdm_class.py::
+        test_rx_process_resolves_mod_scheme_from_header_not_self_modem,
+        and the live scheme-switch tests). Defaulting to
+        self.bits_per_ofdm_symbol here silently reshaped 80 bits into 240
+        the moment the two differed.
         """
         if self.interleaver2 == "none":
             return flat
         xp = self.xp
         n_batch = flat.shape[0]
-        block = self.bits_per_ofdm_symbol
+        block = block or self.bits_per_ofdm_symbol
         rows = flat.reshape(-1, block)
         il = self._get_interleaver2(block)
         out = il.encode(rows) if encode else il.decode(rows)
@@ -1833,7 +1857,8 @@ class Ofdm(Block):
         # interleaver ran over whole padded OFDM symbols on transmit, so
         # the inverse has to see the same whole symbols. Truncating first
         # would hand it a partial block.
-        encoded_bits = self._apply_interleaver2(encoded_bits, encode=False)
+        encoded_bits = self._apply_interleaver2(
+            encoded_bits, encode=False, block=bits_per_symbol_payload)
 
         # Discard any automatic partial-last-symbol padding (see
         # generate_frame()'s docstring/docs/todo.md #1.10) -- the last
@@ -1852,7 +1877,7 @@ class Ofdm(Block):
         # weighting a deep null hands the decoder confident garbage, which
         # is exactly the measured failure mode.
         soft_bits = None
-        if self.soft_decision:
+        if self.soft_decision_active:
             # equalized_combined is already the MAIN-payload slice by here
             # (the C2 rows were split off above), so h_hat_combined has to
             # be sliced the same batch-major/symbol-minor way to stay
@@ -1872,7 +1897,7 @@ class Ofdm(Block):
             # confidences belonging to different bits.
             soft_bits = self._apply_interleaver2(
                 soft_payload.reshape(n_batch, n_payload_symbols * bits_per_symbol_payload),
-                encode=False,
+                encode=False, block=bits_per_symbol_payload,
             )[:, :encoded_bit_count]
 
         # FEC-decode then CRC-strip+check, delegated to payload_packetizer
