@@ -36,8 +36,10 @@ Three results, in order of how much they change the picture.
    spread, a severe channel, not a restatement of platform speed.
 
 3. **A one-sample synchronization offset costs ~0.09 EVM on its own**, is
-   unrelated to Doppler, and is worth fixing independently. A cyclic
-   prefix protects the FFT window in the EARLY direction only.
+   unrelated to Doppler, and has been fixed (`timing_advance`, section
+   6). A cyclic prefix protects the FFT window in the EARLY direction
+   only. Measuring it also turned up a genuine correctness bug in the
+   vectorized sync path, live on `backend="cupy"`, also fixed.
 
 ## Methodology and its limits
 
@@ -243,7 +245,7 @@ absolute closed-form `H_true` does **not** work as a genie, because
 `h_hat` also absorbs the receiver's sync-offset phase ramp; two earlier
 attempts failed on exactly this and the self-check is what caught it.
 
-## 6. The one-sample sync offset (separate issue)
+## 6. The one-sample sync offset (separate issue -- now FIXED)
 
 Independent of Doppler. Static channel, forced FFT-window offset
 (`--part sync`); negative puts the window EARLY, inside the CP:
@@ -269,9 +271,71 @@ per-subcarrier transfer function, so no channel estimate — DMRS-refreshed
 or not — can represent it. **A cyclic prefix buys 64 samples of freedom
 in the early direction and zero in the late direction.**
 
-Why the synchronizer lands there: Schmidl-Cox tracks the energy centroid,
-and a +1-sample echo pulls it right. At 40 dB the peak is sharp enough to
-land on 0 (EVM 0.013); at 25/30 dB noise tips it to 1.
+Why the synchronizer lands there: the metric's flat top is only **2
+samples** wide -- the preamble carries no CP, so there is no broad
+plateau. Noiseless, M(0)=1.0000 against M(1)=0.9995, and an echo biases
+that 0.05% contest toward the late candidate. Measured over 200 seeds,
+the fraction landing one sample late is:
+
+| a | K | 20 dB | 25 dB | 30 dB | 40 dB |
+|---|---|---|---|---|---|
+| 0.0 | - | 15% | 1% | 0% | 0% |
+| 0.2 | 14 dB | 47% | 39% | 31% | 3% |
+| 0.3 | 10.5 dB | 61% | 70% | 83% | **100%** |
+| 0.4 | 8 dB | 78% | 91% | 99% | **100%** |
+
+**More SNR makes it worse**, not better, once the echo is strong enough
+to move the metric's true maximum: a cleaner metric resolves a peak that
+the echo has genuinely shifted, and noise was the only thing
+occasionally knocking it back to the right answer.
+
+### The fix
+
+`Ofdm(timing_advance=...)`, defaulting to 2 samples (auto-clamped for
+small or zero CPs). Every OFDM window -- training, header, DMRS and
+payload, which all walk forward from one `pos` -- is placed that many
+samples early, into the CP. It is applied at `pos` and NOT to
+`start_index`, so the CFO estimator keeps correlating at the preamble
+position sync actually detected.
+
+Measured, static channel, natural sync, 20 seeds, mean EVM:
+
+| a | 25 dB | 30 dB | 40 dB |
+|---|---|---|---|
+| 0.0 | 0.071 -> 0.071 | 0.040 -> 0.040 | 0.013 -> 0.013 |
+| 0.2 | 0.125 -> 0.073 | 0.092 -> 0.041 | 0.013 -> 0.013 |
+| 0.3 | 0.158 -> 0.075 | 0.150 -> 0.042 | **0.149 -> 0.014** |
+| 0.4 | 0.168 -> 0.079 | 0.155 -> 0.044 | **0.149 -> 0.014** |
+
+No change when there is no echo, which is the premise: early placement
+is free. Uncoded 16QAM at a >= 0.2 goes from losing the frame outright to
+decoding bit-exactly. Covered by tests/test_ofdm_timing_advance.py.
+
+### A second, unrelated bug found while measuring this
+
+`SchmidlCoxSync`'s two paths disagreed. The vectorized (numpy/cupy) path
+recovers each windowed sum by differencing two whole-buffer prefix sums,
+so the ACCUMULATOR's ulp -- not the window's own magnitude -- sets the
+smallest window that survives. In float32, on a real 44,672-sample frame,
+the energy total reaches ~137 (ulp ~1.6e-5) while a sample in the quiet
+region past the frame is ~3.5e-7, some 46,000x below half-ulp. Those
+samples stopped accumulating entirely, the difference came back as
+exactly 0.0, the `+ 1e-12` guard took over, and the metric -- documented
+as bounded in [0, 1] -- reached 612, returning a start_index ~41,000
+samples from the true peak.
+
+Reproduced at 35 and 40 dB. The numba path was never affected: it slides
+its window with float64 add/subtract rather than differencing prefix
+sums. Fixed by accumulating in float64/complex128 to match the kernel's
+precision.
+
+This mattered most for `backend="cupy"`, which deliberately skips the
+numba path and therefore had no correct path at all. It hid on x86
+because numba is normally installed. The existing numpy-vs-numba
+cross-checks missed it because they compared numba against a local COPY
+of the same computation inside the test file -- a copy tracks the defect
+instead of catching it. tests/test_sync_numba_acceleration.py now drives
+the real dispatch, and its helper copy was brought back into sync.
 
 At 16QAM this consumes a large share of a ~0.17 budget before Doppler is
 considered. It is not what loses the frames above — the genie passes at
@@ -296,8 +360,12 @@ this up:
 4. **`MAX_PAYLOAD_SYMBOLS=128` blocks both short intervals at this
    payload** (150 and 135 slots). Any such mode needs that guard revisited
    together with the airtime budget, not raised in isolation.
-5. **The sync offset and hard-decision Viterbi are separate, cheaper
-   levers** than changing the DMRS format, and neither has been costed.
+5. **The sync offset is fixed** (`timing_advance`, default 2 samples),
+   which recovers EVM 0.17 -> 0.01-0.07 whenever an echo was biasing
+   sync late, and recovers frames uncoded 16QAM was losing outright.
+   **Hard-decision Viterbi remains an uncosted lever** -- it crosses from
+   correcting to amplifying at raw BER ~0.03, and soft LLRs are the
+   obvious move, but nothing here has measured them.
 
 Everything above is simulation against a single rotating tap. The
 Pi/Pluto mobility measurement named in the PHY specification remains the

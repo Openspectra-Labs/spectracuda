@@ -21,10 +21,19 @@ _NUMBA_OK = nb_mod.numba_available()
 
 
 def _numpy_reference(rx: np.ndarray, L: int):
-    """The original cumsum-based computation, called directly so both
-    paths can be compared on identical input within one test process."""
+    """The cumsum-based computation, called directly so both paths can be
+    compared on identical input within one test process.
+
+    Mirrors schmidl_cox.py's vectorized path INCLUDING its float64
+    accumulators. Keeping the dtypes in sync matters: this helper is a
+    copy, so while it accumulated in float32 it reproduced the very
+    prefix-sum saturation the shipped path had, and these cross-checks
+    agreed with numba only because both sides were being compared to a
+    duplicate of the defect rather than to the shipped code. The test
+    that drives the real dispatch is
+    test_shipped_numpy_path_matches_numba_at_high_snr below."""
     n_samples = rx.shape[-1]
-    a = np.conj(rx[:, :-L]) * rx[:, L:]
+    a = (np.conj(rx[:, :-L]) * rx[:, L:]).astype("complex128")
     n_batch = rx.shape[0]
 
     def _cumsum_with_leading_zero(x):
@@ -32,7 +41,7 @@ def _numpy_reference(rx: np.ndarray, L: int):
         return np.concatenate([zero, np.cumsum(x, axis=-1)], axis=-1)
 
     a_cum = _cumsum_with_leading_zero(a)
-    e = np.abs(rx) ** 2
+    e = (np.abs(rx) ** 2).astype("float64")
     e_cum = _cumsum_with_leading_zero(e)
     b1_cum = e_cum[:, : n_samples - L + 1]
     b2_cum = e_cum[:, L:] - e_cum[:, L : L + 1]
@@ -148,3 +157,70 @@ def test_cupy_backend_never_takes_the_numba_path():
     finally:
         sc_mod.numba_process = real_numba_process
     assert int(result["start_index"][0]) == 0
+
+
+def _make_full_length_frame(sync, rng, true_offset, body, tail, snr_db):
+    """Preamble followed by a long signal BODY and then a quiet tail --
+    the shape of a real captured frame, which the short preamble-only
+    helper above does not reproduce.
+
+    The body is what makes this a regression test. The vectorized path's
+    accumulator saturates once a single sample in the quiet tail falls
+    below one ulp of the RUNNING TOTAL, i.e. once
+    noise_var < total_energy * 2**-23. With only a 256-sample preamble
+    the total never gets large enough and the defect stays hidden no
+    matter how high the SNR goes; with a realistic body it reproduces at
+    ordinary SNRs.
+    """
+    preamble = sync.generate_preamble(seed=int(rng.integers(0, 1000)))
+    sig_power = float(np.mean(np.abs(preamble) ** 2))
+    payload = (rng.standard_normal(body) + 1j * rng.standard_normal(body))
+    payload *= np.sqrt(sig_power / 2)
+    rx_clean = np.concatenate([
+        np.zeros(true_offset, dtype="complex64"), preamble,
+        payload.astype("complex64"), np.zeros(tail, dtype="complex64"),
+    ]).astype("complex64")
+    noise_std = np.sqrt((sig_power / 10 ** (snr_db / 10)) / 2)
+    n = rx_clean.shape[-1]
+    noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * noise_std
+    return (rx_clean + noise).astype("complex64")[None, :]
+
+
+@pytest.mark.skipif(not _NUMBA_OK, reason="numba not installed -- sync acceleration inactive on this machine")
+@pytest.mark.parametrize("snr_db", [30.0, 35.0, 40.0, 50.0])
+def test_shipped_numpy_path_matches_numba_at_high_snr(monkeypatch, snr_db):
+    """Regression: the two SHIPPED paths of one block must agree.
+
+    Drives `SchmidlCoxSync.process` itself and forces the vectorized
+    branch by making numba look unavailable, rather than comparing numba
+    against this file's local `_numpy_reference` copy -- a copy tracks
+    whatever the shipped code does wrong, which is exactly how this
+    escaped.
+
+    High SNR with a long quiet tail is the trigger. The vectorized path
+    recovers each windowed sum by differencing two whole-buffer prefix
+    sums, so the ACCUMULATOR's ulp sets the smallest window that
+    survives. Accumulated in float32, a quiet window's energy fell far
+    below half-ulp of the running total, the difference came back as
+    exactly 0.0, the `+ 1e-12` guard took over, and the metric -- which
+    the module docstring documents as bounded in [0, 1] -- blew up past
+    600, returning a start_index tens of thousands of samples from the
+    true peak while the numba path returned the correct one.
+    """
+    sync = SchmidlCoxSync(fft_size=256, backend="numpy")
+    rng = np.random.default_rng(7)
+    true_offset = 300
+    rx = _make_full_length_frame(sync, rng, true_offset=true_offset,
+                                 body=40320, tail=4096, snr_db=snr_db)
+
+    nb = sync.process(rx)
+    monkeypatch.setattr(sc_mod, "numba_available", lambda: False)
+    npy = sync.process(rx)
+
+    assert int(np.asarray(npy["start_index"])[0]) == int(np.asarray(nb["start_index"])[0]) == true_offset
+    # The bound is the real invariant -- a metric above 1.0 means the
+    # denominator collapsed, whatever start_index happened to come with it.
+    assert float(np.asarray(npy["metric"])[0]) <= 1.0 + 1e-6
+    assert float(np.asarray(npy["metric"])[0]) == pytest.approx(
+        float(np.asarray(nb["metric"])[0]), abs=1e-4
+    )

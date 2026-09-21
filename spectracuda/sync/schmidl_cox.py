@@ -114,7 +114,42 @@ class SchmidlCoxSync(Block):
         # candidate d at once via prefix sums (no per-offset Python loop).
         # R(d) symmetrizes over BOTH halves' energy -- see module
         # docstring for why the textbook second-half-only R(d) is unsafe.
-        a = xp.conj(rx[:, :-L]) * rx[:, L:]
+        # DOUBLE precision for the prefix sums, not the input's
+        # complex64/float32. A prefix sum is a running total over the WHOLE
+        # buffer, and every windowed sum below is recovered by differencing
+        # two of those totals -- so the accumulator's ulp, not the window's
+        # own magnitude, sets the smallest window sum that survives.
+        #
+        # In float32 that breaks outright on any quiet stretch: on a real
+        # 44,672-sample frame the energy total reaches ~137, whose float32
+        # ulp is ~1.6e-5, while a sample in the low-energy region past the
+        # frame is ~3.5e-7 -- roughly 46,000x below half-ulp, so those
+        # samples stop accumulating ENTIRELY and the difference comes back
+        # as exactly 0.0 instead of ~4.5e-5. The `+ 1e-12` guard below then
+        # takes over and metric = |P|^2/1e-12 explodes to ~62 -- on a
+        # quantity the module docstring (correctly) documents as bounded in
+        # [0, 1] -- handing back a start_index tens of thousands of samples
+        # from the true peak. Measured at 35 and 40 dB SNR before this fix;
+        # covered by tests/test_sync_numba_acceleration.py::
+        # test_shipped_numpy_path_matches_numba_at_high_snr (which drives
+        # the real dispatch, unlike that file's older _numpy_reference
+        # cross-checks -- those compare numba against a local COPY of this
+        # computation, so they tracked the bug instead of catching it).
+        #
+        # This is the same "spurious spike at a low-energy boundary" the
+        # module docstring describes; symmetrizing R(d) narrowed when it
+        # fires but did not remove it, because the cause is the
+        # accumulator, not the formula. The `numba_process` path above was
+        # never affected: it slides its window with float64 add/subtract
+        # (Python complex/float accumulators) rather than differencing
+        # prefix sums, which is why the two paths disagreed. Doubling here
+        # makes the vectorized path match the kernel's precision -- it is
+        # NOT merely a tighter tolerance, it is the difference between a
+        # window sum existing and vanishing.
+        #
+        # Matters most for backend="cupy", which deliberately skips the
+        # numba path (see above) and so had no correct path at all.
+        a = (xp.conj(rx[:, :-L]) * rx[:, L:]).astype("complex128")
         n_batch = rx.shape[0]
 
         def _cumsum_with_leading_zero(x):
@@ -147,7 +182,7 @@ class SchmidlCoxSync(Block):
         #     metric correctness on real synthetic preambles, not just
         #     numerical closeness of an intermediate) still passes
         #     unchanged.
-        e = xp.abs(rx) ** 2
+        e = (xp.abs(rx) ** 2).astype("float64")  # float64: see `a` above
         e_cum = _cumsum_with_leading_zero(e)
         b1_cum = e_cum[:, : n_samples - L + 1]
         b2_cum = e_cum[:, L:] - e_cum[:, L : L + 1]

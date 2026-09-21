@@ -300,6 +300,7 @@ class Ofdm(Block):
         iq_dtype: str = "float32",
         sync_threshold: Optional[float] = None,
         strict_fec_check: bool = False,
+        timing_advance: Optional[int] = None,
     ) -> None:
         if fec != "none" and fec not in _FEC_SCHEME_CODES:
             raise ValueError(
@@ -328,6 +329,50 @@ class Ofdm(Block):
                 f"{sorted(_DMRS_PERIOD_INTERVALS)} (0 = off). The interval "
                 f"counts DATA symbols -- see spectracuda/framing/dmrs.py"
             )
+        # Deliberately place every OFDM FFT window a couple of samples
+        # EARLY, into the cyclic prefix. A CP makes the window position
+        # free in the EARLY direction only: starting inside the CP is a
+        # true cyclic shift of the correct window, so it costs nothing but
+        # a phase ramp across subcarriers, which the channel estimate
+        # absorbs exactly (h_hat is measured through the same window). One
+        # sample LATE is not a cyclic shift -- the window runs past the
+        # symbol's last sample into the NEXT symbol, and that leakage
+        # depends on the neighbouring symbol's data, so it is not a
+        # per-subcarrier transfer function and NO channel estimate,
+        # DMRS-refreshed or otherwise, can represent it.
+        #
+        # This is not hypothetical. Schmidl-Cox's timing metric here has a
+        # 2-sample flat top (the preamble has no CP, so there is no broad
+        # plateau -- M(0)=1.0000 vs M(1)=0.9995 noiseless), and a
+        # multipath echo biases the contest toward the LATE candidate:
+        # measured over 200 seeds at a=0.3, sync lands one sample late 61%
+        # of the time at 20 dB and 100% at 40 dB -- MORE SNR makes it
+        # worse, because a cleaner metric resolves a peak that the echo
+        # has genuinely shifted. That one sample costs EVM 0.073 -> 0.163,
+        # roughly half of 16QAM's usable budget, before the channel has
+        # done anything. Measured in examples/dmrs_doppler_study.py
+        # (--part sync) and written up in
+        # docs/2026-09-21-dmrs-differential-doppler-characterization.md.
+        #
+        # Applied at `pos` (the OFDM window origin) and NOT to
+        # start_index, so the CFO estimator keeps using the preamble
+        # position sync actually detected -- advancing its correlation
+        # window would pull in pre-preamble samples for no benefit.
+        #
+        # The advance must fit inside the CP alongside the channel's delay
+        # spread, so it is bounded by cp_len. Default None = "auto" = 2
+        # samples, clamped for small/zero CPs (cp_len=0 is legal and gets
+        # 0, since without a CP there is no early direction to move in).
+        if timing_advance is None:
+            timing_advance = min(2, cp_len)
+        elif not (0 <= timing_advance <= cp_len):
+            raise ValueError(
+                f"timing_advance={timing_advance!r}; expected 0..cp_len "
+                f"({cp_len}). The advance moves every FFT window earlier, "
+                f"into the cyclic prefix, and must leave room for the "
+                f"channel's delay spread -- see the comment above."
+            )
+        self.timing_advance = int(timing_advance)
         if iq_dtype not in ("float16", "float32"):
             raise ValueError(
                 f"iq_dtype={iq_dtype!r}; expected 'float16' or 'float32' "
@@ -1182,7 +1227,11 @@ class Ofdm(Block):
         cfo_estimate = self.cfo.process(rx_iq, start_index=start_index)
         rx_corrected = self.cfo.correct(rx_iq, cfo_estimate)
 
-        pos = start_index + self.fft_size  # preamble has no CP -- see class docstring
+        # preamble has no CP -- see class docstring. `- timing_advance`
+        # places every window that follows (training, header, DMRS and
+        # payload alike, since they all walk forward from this one `pos`)
+        # slightly early inside the CP; see the constructor's comment.
+        pos = start_index + self.fft_size - self.timing_advance
 
         h_hat_data_sum = None
         h_hat_pilots_sum = None  # mirrors h_hat_data_sum -- needed by _decode_payload_from_header()'s
