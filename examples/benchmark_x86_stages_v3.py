@@ -109,7 +109,7 @@ from spectracuda.sync.schmidl_cox import SchmidlCoxSync
 FFT_SIZE = 256
 N_PILOT = 8
 N_DATA = 216
-CP_LEN = 32
+CP_LEN_DEFAULT = 32  # overridable with cp=N -- see _parse_args()
 N_ROUNDS = 30
 N_WARMUP = 5
 DEFAULT_PIN_CORE = 2
@@ -117,27 +117,48 @@ _VALID_MODEMS = {"bpsk", "qpsk", "qam16", "qam64", "qam256"}
 
 
 def _parse_args():
-    """Accepts a bit count (e.g. 32000) and/or a modem scheme (e.g.
-    qam16) as positional args, IN EITHER ORDER (`qam16 32000` and
-    `32000 qam16` both work) -- classified by shape (digits -> bit
-    count, else -> modem scheme name), not position, so callers don't
-    need to remember an argument order."""
+    """Accepts a bit count (e.g. 32000), a modem scheme (e.g. qam16) and
+    a cyclic-prefix length (e.g. cp=64) as positional args, IN ANY ORDER
+    -- classified by shape (digits -> bit count, cp=N -> cyclic prefix,
+    else -> modem scheme name), not position, so callers don't need to
+    remember an argument order.
+
+    `cp` exists because the project moved its reference numerology after
+    this benchmark was written. cp=32 gives a 288-sample symbol (28.8 us
+    at 10 MSps); cp=64 gives 320 samples, which at 20 MSps is 78.125 kHz
+    subcarrier spacing, a 12.8 us symbol and a 3.2 us guard -- the
+    802.11ax grid the Doppler and multipath characterization work all
+    used. Measuring the old numerology and reasoning about the new one is
+    how stale throughput numbers happen.
+
+    Note the real-time budget MOVES with cp: it is frame_samples / 20 MSps,
+    and a longer CP means more samples per frame, so more wall-clock to
+    process it. cp=64 is therefore easier to hit than cp=32 at the same
+    payload, which is a property of the budget, not of the receiver.
+    """
     sdu_bits = 24000
     modem_scheme = "qpsk"
+    cp_len = CP_LEN_DEFAULT
     for arg in sys.argv[1:]:
+        low = arg.lower()
         if arg.isdigit():
             sdu_bits = int(arg)
-        elif arg.lower() in _VALID_MODEMS:
-            modem_scheme = arg.lower()
+        elif low.startswith("cp=") and low[3:].isdigit():
+            cp_len = int(low[3:])
+        elif low in _VALID_MODEMS:
+            modem_scheme = low
         else:
             raise SystemExit(
-                f"Unrecognized argument {arg!r} -- expected a bit count (e.g. 32000) "
-                f"or a modem scheme (one of {sorted(_VALID_MODEMS)})"
+                f"Unrecognized argument {arg!r} -- expected a bit count (e.g. 32000), "
+                f"a cyclic prefix (e.g. cp=64), or a modem scheme "
+                f"(one of {sorted(_VALID_MODEMS)})"
             )
-    return sdu_bits, modem_scheme
+    if not 0 <= cp_len < FFT_SIZE:
+        raise SystemExit(f"cp={cp_len} must be in [0, fft_size={FFT_SIZE})")
+    return sdu_bits, modem_scheme, cp_len
 
 
-SDU_BITS, MODEM_SCHEME = _parse_args()
+SDU_BITS, MODEM_SCHEME, CP_LEN = _parse_args()
 
 
 def _pin_to_one_core() -> str:
