@@ -92,9 +92,19 @@ simulation** to substantially improve resistance to frequency-selective
 multipath. In characterized 20 MSps / 16QAM / 15 dB cases, several
 channels that produced complete packet loss with hard decisions recovered
 completely or nearly completely with soft decisions. Extremely broad or
-deep fades remain problematic. The current software implementation is
-unoptimized and incurs substantial CPU cost, so soft decoding remains
-optional pending optimization and a quantized-LLR / FPGA cost evaluation.
+deep fades remain problematic.
+
+CPU cost has improved substantially since first measurement -- a numba
+soft demapper (2.80 -> 0.56 ms) and routing soft decode through
+libcorrect's existing SSE soft entry point (11.56 -> 1.61 ms, no new C)
+took the penalty from 4-6x RX throughput to 1.4-2.4x. It is still a real
+cost: at 36000 bits / cp=64 / dmrs=32, only qpsk with HARD decision meets
+a 20 Msps budget, and soft roughly halves Msps in every modulation. On
+ARM the improvement does not apply at all -- there is no NEON soft kernel,
+so the Pi-5 still takes the slow portable path.
+
+Soft decoding therefore remains optional pending the remaining kernel
+work and an FPGA cost evaluation.
 
 `Ofdm(soft_decision=True)`, **off by default** — which is the correct
 engineering choice until that optimization and quantization work is

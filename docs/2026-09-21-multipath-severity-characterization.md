@@ -185,13 +185,66 @@ reconstruct. **That is the residual regime — broad, deep fades — and it
 is where diversity or a stronger code, not reliability weighting, would
 be the lever.**
 
-Cost, measured on a clean frame both paths decode successfully:
-`rx_process` median **1.9 ms → 12.8 ms (6.6×)**, splitting roughly evenly
-between an unoptimized soft demapper (0.13 → 2.80 ms, no numba kernel
-where the hard path has one) and the forfeited accelerated Viterbi (0.42
-→ 3.18 ms, since libcorrect has no `fast`/`neon` soft kernel). Roughly
-half is removable without touching C. Timings are WSL2 medians on a noisy
-machine — indicative, not a spec.
+### What soft decision costs
+
+Two optimizations landed after the first measurement, and both moved it a
+long way. The figures below supersede the 6.6x originally recorded here.
+
+`rx_process`, clean frame both paths decode successfully:
+
+| | first measured | after numba demapper | after SSE soft decode |
+|---|---|---|---|
+| hard | 1.9 ms | 1.9 ms | 1.9 ms |
+| soft | 12.8 ms | 10.3 ms | — |
+| ratio | 6.6x | 5.3x | ~2x (see below) |
+
+The two pieces, measured separately:
+
+* **Soft demapper** 2.80 ms -> 0.56 ms. A numba kernel mirroring the
+  existing hard-decision one, decomposed PER AXIS: square Gray QAM is
+  separable, so an I-bit's LLR depends only on the I axis and the Q term
+  cancels in the difference. 16 distances + 64 comparisons per 16QAM
+  symbol becomes 8 + 16.
+* **Soft Viterbi** 11.56 ms -> 1.61 ms at k=51000, a 7.3x gain that
+  needed no new C at all: libcorrect already ships
+  `correct_convolutional_sse_decode_soft` and the SSE build already
+  exported it. Output is bit-identical to the portable loop.
+
+A caution that cost a wrong conclusion once: **libcorrect's soft decoder
+is strongly data-dependent.** At k=51000 the portable loop measures
+3.6 ms on 0/255 rails, 3.2 ms on all-erasure, but 10.9 ms on realistic
+graded values. An early benchmark fed it rails and reported a 7x
+soft/hard gap when the real figure was ~22x. Always measure it on graded
+input.
+
+End-to-end RX SDU throughput (`examples/benchmark_x86_stages_v3.py
+36000 <modem> cp=64 dmrs=32 [soft]`), 20 Msps budget:
+
+| modem | hard | soft | hard vs budget |
+|---|---|---|---|
+| qpsk | 10.7-10.9 Mbps (25.1-25.5 Msps) | 6.6-7.2 Mbps | **OK** |
+| qam16 | 18.1-19.2 Mbps (16.4-17.4 Msps) | 9.6-9.8 Mbps | 0.82-0.87x short |
+| qam64 | 22.6-23.3 Mbps (13.8-14.2 Msps) | 11.1-11.5 Mbps | 0.69-0.71x short |
+
+Only qpsk with hard decision makes real time. Soft roughly halves Msps
+across the board -- 1.4-2.4x, against 4-6x before these two changes.
+
+**Two gaps remain, both real:**
+
+* **ARM is untouched.** `sse_available()` is False on the Pi-5 target, so
+  soft decode there still runs the 11.5 ms portable loop. libcorrect has
+  no NEON soft kernel and one cannot be honestly validated from an x86
+  machine.
+* **The `fast` kernel has no soft variant**, so soft does not reach the
+  hard path's best backend (1.24 ms against 0.44 ms in the RX stage
+  table). Its header explains why that is a design change rather than a
+  port: path metrics are 8-bit, justified by the K=7 survivor spread
+  being "<= 12 **for hard decisions**". Soft branch metrics are far
+  larger. A soft variant needs 16-bit metrics (halving states per vector,
+  giving back much of the gain) or branch metrics quantized tightly
+  enough to keep the spread bounded -- which the 4-bit LLR result below
+  suggests may be feasible, but it needs an overflow-safety argument, not
+  an assumption.
 
 ## 8. How many LLR bits does it need?
 
