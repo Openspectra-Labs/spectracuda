@@ -172,3 +172,69 @@ def test_soft_recovers_a_frame_hard_decision_loses(a, delay_ns):
     r = soft.rx_process(two_path(soft, bits, a, delay_ns, 15.0, seed=9000))
     assert bool(np.asarray(r["crc_valid"])[0])
     np.testing.assert_array_equal(np.asarray(r["bits"])[0][: bits.shape[1]], bits[0])
+
+
+# -- the numba soft demapper -------------------------------------------
+
+
+def test_numba_soft_demod_matches_the_numpy_reference():
+    """The kernel decomposes per AXIS (separable square Gray QAM), while
+    mapper.py's reference takes the min over ALL constellation points.
+    Those are mathematically identical, so they must agree to within
+    byte rounding -- this is the gate that says the fast path is not
+    quietly a different demapper."""
+    from spectracuda.modem._numba_mapper import numba_available
+    if not numba_available():
+        pytest.skip("numba not installed")
+    for scheme in ("qpsk", "qam16"):
+        m = Modem(scheme, backend="numpy")
+        rng = np.random.default_rng(0)
+        rows, carr = 40, 216
+        sym = np.asarray(m.modulate(
+            rng.integers(0, 2, size=(1, m.bits_per_symbol * rows * carr)).astype("uint8")
+        )).reshape(rows, carr)
+        sym = (sym + (rng.standard_normal((rows, carr))
+                      + 1j * rng.standard_normal((rows, carr))) * 0.12).astype("complex64")
+        w = np.abs(rng.standard_normal((rows, carr))) ** 2
+        w = (w / w.mean()).astype("float32")
+
+        real = Modem._numba_path_applies
+        Modem._numba_path_applies = lambda self, s: False
+        try:
+            ref = np.asarray(m.demodulate_soft(sym, weight=w))
+        finally:
+            Modem._numba_path_applies = real
+        got = np.asarray(m.demodulate_soft(sym, weight=w))
+        assert np.abs(got.astype(int) - ref.astype(int)).max() <= 1
+        assert (got != ref).mean() < 1e-3
+
+
+def test_bpsk_soft_falls_back_instead_of_raising():
+    """bpsk is not a separable two-axis QAM, so the per-axis kernel cannot
+    express it -- it must take the numpy path rather than blowing up."""
+    m = Modem("bpsk", backend="numpy")
+    bits = np.random.default_rng(0).integers(0, 2, size=(1, 400)).astype("uint8")
+    soft = np.asarray(m.demodulate_soft(m.modulate(bits)))
+    assert soft.shape == (1, 400)
+    np.testing.assert_array_equal((soft > 127).astype("uint8"),
+                                  np.asarray(m.demodulate(m.modulate(bits))))
+
+
+@pytest.mark.parametrize("llr_bits", [2, 3, 4, 5, 6])
+def test_quantizer_produces_the_expected_level_count(llr_bits):
+    """2L+1 levels with L = 2^(b-1)-1, and a level AT zero -- that is the
+    'no information' symbol a faded subcarrier has to be able to emit."""
+    m = Modem("qam16", backend="numpy")
+    rng = np.random.default_rng(0)
+    sym = np.asarray(m.modulate(rng.integers(0, 2, size=(1, 4 * 3000)).astype("uint8")))
+    sym = sym + (rng.standard_normal(sym.shape) + 1j * rng.standard_normal(sym.shape)) * 0.35
+    soft = np.asarray(m.demodulate_soft(sym, llr_bits=llr_bits))
+    assert len(np.unique(soft)) <= 2 * (2 ** (llr_bits - 1) - 1) + 1
+    assert 128 in np.unique(soft)
+
+
+def test_llr_bits_below_two_is_rejected():
+    m = Modem("qam16", backend="numpy")
+    sym = np.asarray(m.modulate(np.zeros((1, 16), "uint8")))
+    with pytest.raises(ValueError, match="1 bit IS hard decision"):
+        m.demodulate_soft(sym, llr_bits=1)

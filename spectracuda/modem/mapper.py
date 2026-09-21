@@ -25,7 +25,7 @@ from typing import Any, Tuple
 import numpy as np
 
 from ..block import Block
-from ._numba_mapper import numba_available, numba_hard_decision
+from ._numba_mapper import numba_available, numba_hard_decision, numba_soft_llr
 
 _BITS_PER_SYMBOL = {
     "bpsk": 1,
@@ -222,11 +222,22 @@ class Modem(Block):
         question -- bit width alone does not determine performance,
         because the clipping range decides what those levels SPAN.
         """
+        if llr_bits is not None and int(llr_bits) < 2:
+            # Validated BEFORE dispatch: 1 bit leaves the quantizer with
+            # zero levels either side of centre, and the fast path would
+            # divide by it.
+            raise ValueError(f"llr_bits must be >= 2 (got {llr_bits}); 1 bit IS hard decision")
         xp = self.xp
         y = xp.asarray(symbols)
         if y.ndim == 1:
             y = y[None, :]
         pts, labels = self._point_table()
+        # bpsk is not a separable two-axis QAM, so the per-axis kernel
+        # does not apply to it -- it keeps the generic numpy path below.
+        if self.scheme != "bpsk" and self._numba_path_applies(y):
+            return numba_soft_llr(y, pts, labels,
+                                  None if weight is None else np.asarray(weight),
+                                  float(llr_clip), llr_bits)
         pts = xp.asarray(pts)
         d = xp.abs(y[..., None] - pts[None, None, :]) ** 2      # (..., M)
         sigma2 = float(xp.mean(xp.min(d, axis=-1))) or 1e-12
@@ -243,8 +254,6 @@ class Modem(Block):
         llr = xp.clip(llr / llr_clip, -1.0, 1.0)
         if llr_bits is not None:
             b = int(llr_bits)
-            if b < 2:
-                raise ValueError(f"llr_bits must be >= 2 (got {b}); 1 bit IS hard decision")
             # Mid-tread signed quantizer: 2*L+1 levels symmetric about 0,
             # L = 2^(b-1)-1. Keeping a level AT zero matters -- that is the
             # "no information" symbol a faded subcarrier needs to be able
