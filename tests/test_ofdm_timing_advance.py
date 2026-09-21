@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from spectracuda.pipeline import Ofdm
+from spectracuda.sim import Channel
 
 FFT, CP, NDATA, NPILOT = 256, 64, 216, 8
 FS = 10e6
@@ -40,17 +41,15 @@ def make(timing_advance=None, cp_len=CP, **kw):
 
 
 def two_ray(tx, a, snr_db, seed):
-    """Static two-ray: LOS plus a one-sample echo. No Doppler -- this is
-    purely about where the FFT window lands."""
-    tx = np.asarray(tx)
-    tx = np.concatenate([tx, np.zeros((tx.shape[0], TAIL), tx.dtype)], axis=1)
-    delayed = np.concatenate([np.zeros((tx.shape[0], 1), tx.dtype), tx[:, :-1]], axis=1)
-    rx = tx + a * delayed
-    rng = np.random.default_rng(seed)
-    s = np.sqrt(float(np.mean(np.abs(rx) ** 2)) / (2 * 10 ** (snr_db / 10)))
-    n = rx.shape[-1]
-    noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype("complex64")
-    return (rx + s * noise[None, :]).astype("complex64")
+    """Static two-ray: LOS plus a one-sample echo, no Doppler -- this is
+    purely about where the FFT window lands. Built from the shared
+    `sim.Channel` rather than hand-rolled, so the trailing-capture
+    discipline (see that class's docstring) is not re-derived here."""
+    return Channel(
+        snr_db=snr_db,
+        multipath_taps=np.array([1.0, a], dtype="complex64"),
+        tail_samples=TAIL, seed=seed, backend="numpy",
+    ).process(tx)
 
 
 def bits_for(ofdm, n_symbols=40, seed=1):

@@ -55,6 +55,7 @@ import numpy as np
 
 from spectracuda.pipeline import Ofdm
 from spectracuda.pipeline import ofdm as _ofdm_mod
+from spectracuda.sim import Channel
 from spectracuda.framing import dmrs as _dmrs
 from spectracuda.framing import header as _header
 
@@ -112,44 +113,42 @@ def make(dmrs_interval, modem="qam16", max_slots=256):
 # -- harness-only capability 2: independent LOS/echo Doppler ------------
 
 def channel(tx, a=A_DEFAULT, f_los=0.0, f_echo=0.0, delay=1,
-            snr_db=SNR_DEFAULT, seed=0, noiseless=False):
-    """rx[n] = e^{j2pi f_los n/fs} tx[n] + a e^{j2pi f_echo n/fs} tx[n-delay]
+            snr_db=SNR_DEFAULT, seed=0, noiseless=False, fs=FS):
+    """Two-ray channel with independent LOS/echo Doppler, via the shared
+    `spectracuda.sim.Channel`:
+
+        rx[n] = e^{j2pi f_los n/fs} tx[n]
+              + a e^{j2pi f_echo n/fs} tx[n-delay]
 
     delta_f = f_echo - f_los is the differential Doppler. Equal f_los and
     f_echo give a frequency-selective channel that is STATIC after common
     CFO/CPE correction, however large the absolute Doppler is.
 
-    Two methodology details that silently corrupted an earlier round of
-    measurements with a predecessor of this helper (see
-    docs/2026-09-20-dmrs-static-channel-cost.md):
+    `fs` is the only place the sample rate enters a simulation: the frame
+    is the same sample sequence either way, but a 320-sample symbol is
+    32.0 us at 10 MSps and 16.0 us at 20 MSps, so the same Doppler ages
+    the channel half as much per symbol at the higher rate. `delay` is in
+    SAMPLES, so a fixed physical echo is 1 sample at 10 MSps and 2 at
+    20 MSps.
 
-    1. Trailing samples. Multipath can move the detected frame start a
-       sample late; a frame ending flush with the array then needs one
-       sample past the end and the bounds check raises, which looks like
-       a lost packet but is a simulation boundary. Real captures always
-       have samples after the frame.
-    2. Length-independent noise. Drawing standard_normal(n) twice makes
-       the IMAGINARY part depend on n. DMRS changes the frame length, so
-       the same seed would otherwise hand each interval different
-       preamble noise -- an apparent interval-dependent PER that is pure
-       artifact. Draw at a fixed length and slice.
+    `tail_samples` and `noise_draw_len` are the two methodology settings
+    whose absence silently corrupted an earlier round of measurements --
+    Channel's own docstring and docs/2026-09-20-dmrs-static-channel-cost.md
+    explain both. They live in the shared class now rather than being
+    re-derived per harness.
     """
-    tx = np.asarray(tx)
-    tx = np.concatenate([tx, np.zeros((tx.shape[0], TAIL), tx.dtype)], axis=1)
-    n = np.arange(tx.shape[-1])
-    d = np.concatenate([np.zeros((tx.shape[0], delay), tx.dtype),
-                        tx[:, :-delay]], axis=1)
-    rx = (np.exp(1j * 2 * np.pi * f_los * n / FS)[None, :] * tx
-          + a * np.exp(1j * 2 * np.pi * f_echo * n / FS)[None, :] * d)
-    if noiseless:
-        return rx.astype("complex64")
-    rng = np.random.default_rng(seed)
-    if rx.shape[-1] > NOISE_LEN:
-        raise ValueError("raise NOISE_LEN for this frame size")
-    s = np.sqrt(float(np.mean(np.abs(rx) ** 2)) / (2 * 10 ** (snr_db / 10)))
-    noise = (rng.standard_normal(NOISE_LEN)
-             + 1j * rng.standard_normal(NOISE_LEN)).astype("complex64")
-    return (rx + s * noise[:rx.shape[-1]][None, :]).astype("complex64")
+    taps = np.zeros(delay + 1, dtype="complex64")
+    taps[0] = 1.0
+    taps[delay] = a
+    dop = np.zeros(delay + 1, dtype="float64")
+    dop[0] = f_los
+    dop[delay] = f_echo
+    return Channel(
+        snr_db=None if noiseless else snr_db,
+        multipath_taps=taps, tap_doppler_hz=dop, sample_rate_hz=fs,
+        tail_samples=TAIL, noise_draw_len=NOISE_LEN, seed=seed,
+        backend="numpy",
+    ).process(tx)
 
 
 @contextlib.contextmanager

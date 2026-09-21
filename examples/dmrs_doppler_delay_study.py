@@ -70,18 +70,11 @@ COMBOS = [
 
 
 def channel(tx, fs, delay, a=0.2, f_los=0.0, f_echo=0.0, snr_db=15.0, seed=0):
-    tx = np.asarray(tx)
-    tx = np.concatenate([tx, np.zeros((tx.shape[0], TAIL), tx.dtype)], axis=1)
-    n = np.arange(tx.shape[-1])
-    d = np.concatenate([np.zeros((tx.shape[0], delay), tx.dtype),
-                        tx[:, :-delay]], axis=1)
-    rx = (np.exp(1j*2*np.pi*f_los*n/fs)[None, :]*tx
-          + a*np.exp(1j*2*np.pi*f_echo*n/fs)[None, :]*d)
-    rng = np.random.default_rng(seed)
-    s = np.sqrt(float(np.mean(np.abs(rx)**2))/(2*10**(snr_db/10)))
-    noise = (rng.standard_normal(NOISE_LEN)
-             + 1j*rng.standard_normal(NOISE_LEN)).astype("complex64")
-    return (rx + s*noise[:rx.shape[-1]][None, :]).astype("complex64")
+    """Delegates to the shared harness channel (itself `sim.Channel`).
+    `delay` is in SAMPLES, so a fixed 100 ns echo is 1 sample at 10 MSps
+    and 2 at 20 MSps -- which is the whole point of this study."""
+    return H.channel(tx, a=a, f_los=f_los, f_echo=f_echo, delay=delay,
+                     snr_db=snr_db, seed=seed, fs=fs)
 
 
 def cell(fs, iv, delay, delta_f, snr=15.0, a=0.2, trials=300,

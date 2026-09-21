@@ -64,3 +64,125 @@ def test_impairments_compose_awgn_multipath_cfo():
     y = channel.process(x)
     assert y.shape == x.shape
     assert not np.allclose(y, x)  # something actually happened
+
+
+# -- time-varying multipath (tap_doppler_hz) ---------------------------
+
+
+def _ref(x, taps, dopplers, fs):
+    """Independent reference: y[n] = sum_k taps[k]*e^{j2pi f_k n/fs}*x[n-k],
+    written out directly rather than reusing the implementation."""
+    x = np.asarray(x)
+    n = np.arange(x.shape[-1])
+    y = np.zeros_like(x, dtype="complex128")
+    for k, (h, f) in enumerate(zip(taps, dopplers)):
+        shifted = np.concatenate([np.zeros((x.shape[0], k), x.dtype), x[:, :x.shape[-1]-k]], axis=-1) if k else x
+        y += h * np.exp(1j*2*np.pi*f*n/fs)[None, :] * shifted
+    return y
+
+
+def test_zero_tap_doppler_matches_the_static_multipath_path():
+    """The two branches must agree exactly when nothing is moving --
+    otherwise every existing static-multipath result silently shifts the
+    moment a caller adds tap_doppler_hz=[0, 0]."""
+    taps = np.array([1.0, 0.2], dtype="complex64")
+    x = (np.random.default_rng(0).standard_normal((2, 2000))
+         + 1j * np.random.default_rng(1).standard_normal((2, 2000))).astype("complex64")
+    static = Channel(multipath_taps=taps, backend="numpy").process(x)
+    moving = Channel(multipath_taps=taps, tap_doppler_hz=[0.0, 0.0],
+                     sample_rate_hz=10e6, backend="numpy").process(x)
+    np.testing.assert_allclose(np.asarray(moving), np.asarray(static), atol=0, rtol=0)
+
+
+def test_tap_doppler_matches_the_closed_form():
+    taps = np.array([1.0, 0.2], dtype="complex64")
+    dop = [1600.0, 1900.0]
+    fs = 20e6
+    x = (np.random.default_rng(2).standard_normal((1, 3000))
+         + 1j * np.random.default_rng(3).standard_normal((1, 3000))).astype("complex64")
+    got = Channel(multipath_taps=taps, tap_doppler_hz=dop, sample_rate_hz=fs,
+                  backend="numpy").process(x)
+    np.testing.assert_allclose(np.asarray(got), _ref(x, taps, dop, fs), atol=1e-5)
+
+
+def test_equal_tap_doppler_leaves_the_channel_shape_static():
+    """The point of the parameter. Equal shifts on every tap are a COMMON
+    Doppler -- one rotating phase on the whole signal, which CFO/CPE
+    remove -- so dividing it out must recover the static channel. Only a
+    DIFFERENCE between taps makes H[k] itself time-varying."""
+    taps = np.array([1.0, 0.2], dtype="complex64")
+    fs, f = 20e6, 1600.0
+    x = (np.random.default_rng(4).standard_normal((1, 3000))
+         + 1j * np.random.default_rng(5).standard_normal((1, 3000))).astype("complex64")
+    common = np.asarray(Channel(multipath_taps=taps, tap_doppler_hz=[f, f],
+                                sample_rate_hz=fs, backend="numpy").process(x))
+    static = np.asarray(Channel(multipath_taps=taps, backend="numpy").process(x))
+    derotated = common * np.exp(-1j*2*np.pi*f*np.arange(x.shape[-1])/fs)[None, :]
+    np.testing.assert_allclose(derotated, static, atol=1e-5)
+
+
+def test_differential_tap_doppler_does_make_it_time_varying():
+    """Complement of the test above: with unequal tap shifts, no single
+    de-rotation can recover a static channel."""
+    taps = np.array([1.0, 0.2], dtype="complex64")
+    fs = 20e6
+    x = (np.random.default_rng(6).standard_normal((1, 3000))
+         + 1j * np.random.default_rng(7).standard_normal((1, 3000))).astype("complex64")
+    diff = np.asarray(Channel(multipath_taps=taps, tap_doppler_hz=[1600.0, 1900.0],
+                              sample_rate_hz=fs, backend="numpy").process(x))
+    static = np.asarray(Channel(multipath_taps=taps, backend="numpy").process(x))
+    for f in (1600.0, 1750.0, 1900.0):
+        derotated = diff * np.exp(-1j*2*np.pi*f*np.arange(x.shape[-1])/fs)[None, :]
+        assert not np.allclose(derotated, static, atol=1e-3)
+
+
+def test_tap_doppler_requires_taps_and_a_sample_rate():
+    with pytest.raises(ValueError, match="needs multipath_taps"):
+        Channel(tap_doppler_hz=[0.0], backend="numpy")
+    with pytest.raises(ValueError, match="sample_rate_hz is required"):
+        Channel(multipath_taps=np.array([1.0], "complex64"),
+                tap_doppler_hz=[0.0], backend="numpy")
+
+
+def test_tap_doppler_length_must_match_taps():
+    with pytest.raises(ValueError, match="one .*shift per tap"):
+        Channel(multipath_taps=np.array([1.0, 0.2], "complex64"),
+                tap_doppler_hz=[0.0], sample_rate_hz=10e6, backend="numpy")
+
+
+# -- methodology knobs -------------------------------------------------
+
+
+def test_tail_samples_extends_the_output_and_carries_the_multipath_tail():
+    taps = np.array([1.0, 0.5], dtype="complex64")
+    x = np.ones((1, 100), dtype="complex64")
+    y = np.asarray(Channel(multipath_taps=taps, tail_samples=32,
+                           backend="numpy").process(x))
+    assert y.shape == (1, 132)
+    # the echo of the last real sample lands in the tail, not nowhere
+    assert abs(y[0, 100]) == pytest.approx(0.5, abs=1e-5)
+
+
+def test_noise_draw_len_keeps_the_same_seed_sample_identical_across_lengths():
+    """The artifact this exists for: without it, changing the frame length
+    changes the noise REALIZATION, so a DMRS interval or payload size
+    change looks like a channel effect. Compared on the signal-free case
+    so the SNR-scaling term (which legitimately tracks input power) does
+    not enter."""
+    x = np.zeros((1, 4000), dtype="complex64")
+    x[:] = 1.0
+    kw = dict(snr_db=20.0, seed=7, backend="numpy")
+    long_ = np.asarray(Channel(noise_draw_len=8000, **kw).process(x))
+    short = np.asarray(Channel(noise_draw_len=8000, **kw).process(x[:, :2500]))
+    np.testing.assert_allclose(long_[:, :2500], short, atol=1e-6)
+
+    loose_long = np.asarray(Channel(**kw).process(x))
+    loose_short = np.asarray(Channel(**kw).process(x[:, :2500]))
+    assert not np.allclose(loose_long[:, :2500], loose_short, atol=1e-3)
+
+
+def test_noise_draw_len_shorter_than_the_input_raises():
+    with pytest.raises(ValueError, match="shorter than"):
+        Channel(snr_db=20.0, noise_draw_len=10, backend="numpy").process(
+            np.ones((1, 100), dtype="complex64")
+        )

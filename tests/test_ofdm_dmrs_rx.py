@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 
 from spectracuda.pipeline import Ofdm
+from spectracuda.sim import Channel
 
 FFT, CP, NDATA, NPILOT = 256, 32, 216, 8
 FS = 10e6
@@ -57,41 +58,29 @@ def time_varying_two_ray(tx, a=0.5, fd=100.0, fs=FS, snr_db=30.0, seed=0):
     """rx[n] = tx[n] + a*exp(j*2*pi*fd*n/fs)*tx[n-1].
 
     H[k,t] = 1 + a*e^{j2*pi*fd*t}*e^{-j2*pi*k/N}: the notch moves across
-    the band as the frame runs, so the channel estimate taken at the
-    start of the frame goes progressively stale. Exactly the impairment
-    DMRS exists to fix, and exactly the one a phase-only correction
-    cannot.
+    the band as the frame runs, so a channel estimate taken at the start
+    of the frame goes progressively stale. Exactly the impairment DMRS
+    exists to fix, and exactly the one a phase-only correction cannot.
 
-    Two details that are methodology, not physics, and that silently
-    corrupted an earlier round of measurements with this helper (see
-    docs/2026-09-20-dmrs-static-channel-cost.md):
+    `fd` here is a DIFFERENTIAL Doppler -- it rides on the echo while the
+    LOS path stays put. A shift common to both paths is what CFO/CPE
+    already remove; only the difference ages H[k]. See
+    docs/2026-09-21-dmrs-differential-doppler-characterization.md.
 
-    1. **Trailing samples.** Multipath can move the detected frame start
-       a sample late. A frame that ends flush with the array then needs
-       one sample past the end and the bounds check raises -- which
-       looks like a failed packet but is a simulation boundary, not a
-       decode failure. A real capture always has samples after the
-       frame, so the tail is added here to match.
-    2. **Length-independent noise.** Drawing `standard_normal(n)` twice
-       makes the IMAGINARY part depend on `n`: the second draw starts
-       wherever the first ended. DMRS changes the frame length, so the
-       same seed would otherwise hand each interval different preamble
-       noise -- different sync behaviour, and an apparent
-       interval-dependent PER that is pure artifact. Drawing at a fixed
-       length and slicing keeps every interval on identical noise.
+    Built from `sim.Channel`'s `tap_doppler_hz`, which exists because
+    neither `multipath_taps` (static) nor `cfo` (one common rotation)
+    could express this. `tail_samples` and `noise_draw_len` are the two
+    methodology settings whose absence silently corrupted an earlier
+    round of measurements -- see that class's docstring and
+    docs/2026-09-20-dmrs-static-channel-cost.md.
     """
-    tx = np.asarray(tx)
-    tx = np.concatenate([tx, np.zeros((tx.shape[0], _TAIL), tx.dtype)], axis=1)
-    n = np.arange(tx.shape[-1])
-    delayed = np.concatenate([np.zeros((tx.shape[0], 1), tx.dtype), tx[:, :-1]], axis=1)
-    rx = tx + a * np.exp(1j * 2 * np.pi * fd * n / fs)[None, :] * delayed
-
-    rng = np.random.default_rng(seed)
-    assert rx.shape[-1] <= _NOISE_LEN, "raise _NOISE_LEN for this frame size"
-    noise = (rng.standard_normal(_NOISE_LEN) + 1j * rng.standard_normal(_NOISE_LEN))[: rx.shape[-1]]
-    noise_power = np.mean(np.abs(rx) ** 2) / (10 ** (snr_db / 10))
-    rx = rx + np.sqrt(noise_power / 2) * noise[None, :]
-    return rx.astype("complex64")
+    return Channel(
+        snr_db=snr_db,
+        multipath_taps=np.array([1.0, a], dtype="complex64"),
+        tap_doppler_hz=[0.0, fd], sample_rate_hz=fs,
+        tail_samples=_TAIL, noise_draw_len=_NOISE_LEN,
+        seed=seed, backend="numpy",
+    ).process(tx)
 
 
 def evm_per_symbol(result, n_batch=1):

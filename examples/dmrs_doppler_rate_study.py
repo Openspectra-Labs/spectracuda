@@ -65,19 +65,12 @@ COMBOS = [(10e6, 16), (10e6, 32),
 
 
 def channel(tx, fs, a=0.2, f_los=0.0, f_echo=0.0, snr_db=15.0, seed=0):
-    """Same two-ray model as the other studies, with fs as a parameter --
-    fs is the ONLY place the sample rate enters the simulation."""
-    tx = np.asarray(tx)
-    tx = np.concatenate([tx, np.zeros((tx.shape[0], TAIL), tx.dtype)], axis=1)
-    n = np.arange(tx.shape[-1])
-    d = np.concatenate([np.zeros((tx.shape[0], 1), tx.dtype), tx[:, :-1]], axis=1)
-    rx = (np.exp(1j*2*np.pi*f_los*n/fs)[None, :]*tx
-          + a*np.exp(1j*2*np.pi*f_echo*n/fs)[None, :]*d)
-    rng = np.random.default_rng(seed)
-    s = np.sqrt(float(np.mean(np.abs(rx)**2))/(2*10**(snr_db/10)))
-    noise = (rng.standard_normal(NOISE_LEN)
-             + 1j*rng.standard_normal(NOISE_LEN)).astype("complex64")
-    return (rx + s*noise[:rx.shape[-1]][None, :]).astype("complex64")
+    """Delegates to the shared harness channel (itself `sim.Channel`), so
+    the tail/noise-draw discipline lives in one place. fs is the only
+    place the sample rate enters; the echo stays at ONE SAMPLE here --
+    see the module docstring for why that is deliberate."""
+    return H.channel(tx, a=a, f_los=f_los, f_echo=f_echo, delay=1,
+                     snr_db=snr_db, seed=seed, fs=fs)
 
 
 def slot_us(fs):
