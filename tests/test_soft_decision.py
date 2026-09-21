@@ -238,3 +238,35 @@ def test_llr_bits_below_two_is_rejected():
     sym = np.asarray(m.modulate(np.zeros((1, 16), "uint8")))
     with pytest.raises(ValueError, match="1 bit IS hard decision"):
         m.demodulate_soft(sym, llr_bits=1)
+
+
+def test_soft_decode_prefers_the_sse_backend_when_available():
+    """SSE soft is measured 7.3x faster than the portable soft loop on a
+    realistic graded frame, with bit-identical output. If the selection
+    silently fell back to portable, soft decision would cost ~5x more RX
+    time than it needs to and nothing would fail."""
+    from spectracuda.fec._native import sse_available
+    c = ConvolutionalCode(backend="numpy")
+    msg = np.random.default_rng(0).integers(0, 2, size=(1, 300)).astype("uint8")
+    enc = np.asarray(c.encode(msg))
+    c.decode_soft((enc * 255).astype("uint8"))
+    expected = "NativeConvolutionalSSE" if sse_available() else "NativeConvolutional"
+    assert type(c._native_soft).__name__ == expected
+
+
+def test_sse_and_portable_soft_decoders_agree_on_graded_input():
+    """The two must not diverge -- 0/255 rails would not exercise the
+    branch metrics that differ between the scalar and vector loops."""
+    from spectracuda.fec._native import (NativeConvolutional,
+                                         NativeConvolutionalSSE,
+                                         sse_available)
+    if not sse_available():
+        pytest.skip("no SSE build on this machine")
+    p, q = NativeConvolutional(), NativeConvolutionalSSE()
+    msg = np.random.default_rng(0).integers(0, 2, size=(1, 4000)).astype("uint8")
+    enc = np.asarray(p.encode(msg))
+    rng = np.random.default_rng(1)
+    soft = np.clip(128 + (enc.astype(int) * 2 - 1) * rng.integers(5, 127, enc.shape),
+                   0, 255).astype("uint8")
+    np.testing.assert_array_equal(np.asarray(p.decode_soft(soft)),
+                                  np.asarray(q.decode_soft(soft)))

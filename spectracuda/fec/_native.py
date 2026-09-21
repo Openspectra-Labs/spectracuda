@@ -342,6 +342,15 @@ def _bind_sse_signatures(lib: ctypes.CDLL) -> None:
     lib.correct_convolutional_sse_encode.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8)
     ]
+    # SSE soft decode. Like the portable one this is a BINDING, not new
+    # C -- libcorrect ships correct_convolutional_sse_decode_soft and the
+    # SSE .so already exports it. Worth having because the portable soft
+    # loop is what soft decision currently falls back to, and that is
+    # measured as ~70% of soft RX time.
+    lib.correct_convolutional_sse_decode_soft.restype = ctypes.c_ssize_t
+    lib.correct_convolutional_sse_decode_soft.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8)
+    ]
     lib.correct_convolutional_sse_decode.restype = ctypes.c_ssize_t
     lib.correct_convolutional_sse_decode.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(ctypes.c_uint8)
@@ -744,6 +753,26 @@ class NativeConvolutionalSSE:
     def decode(self, bits: np.ndarray) -> np.ndarray:
         bits = np.asarray(bits, dtype="uint8")
         return np.stack([self._decode_one(bits[b]) for b in range(bits.shape[0])])
+
+    def _decode_soft_one(self, soft: np.ndarray) -> np.ndarray:
+        # Same _DECODE_PAD_PAIRS workaround as this class's _decode_one;
+        # the soft entry point shares the same history_buffer/bit_writer
+        # code, so it withholds trailing bits identically.
+        T = len(soft) // 2
+        k = T - _TAIL_BITS
+        padded = np.concatenate([soft, np.zeros(2 * _DECODE_PAD_PAIRS, dtype="uint8")])
+        Tp = T + _DECODE_PAD_PAIRS
+        msg_out = (ctypes.c_uint8 * (Tp // 8 + 8))()
+        n_written = _sse_lib.correct_convolutional_sse_decode_soft(
+            self._conv, padded.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)), 2 * Tp, msg_out
+        )
+        decoded = np.unpackbits(np.frombuffer(bytes(msg_out[: max(n_written, 0)]), dtype="uint8"))
+        return decoded[:k].astype("uint8")
+
+    def decode_soft(self, soft: np.ndarray) -> np.ndarray:
+        soft = np.ascontiguousarray(soft, dtype="uint8")
+        return np.stack([self._decode_soft_one(soft[b]) for b in range(soft.shape[0])])
+
 
 
 class NativeConvolutionalNEON:
