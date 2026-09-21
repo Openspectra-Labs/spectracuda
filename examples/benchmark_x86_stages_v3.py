@@ -131,6 +131,14 @@ def _parse_args():
     used. Measuring the old numerology and reasoning about the new one is
     how stale throughput numbers happen.
 
+    `dmrs` turns on periodic channel refresh (dmrs=16/32/64, or 0 = off,
+    the default this benchmark has always used). It is NOT free on either
+    side: TX emits one extra training-like symbol per interval, and RX
+    re-estimates H[k] at each of them and equalizes every payload symbol
+    against its own segment's estimate instead of one frame-wide estimate.
+    Leaving it off measures a receiver that does strictly less work than
+    the one the Doppler/multipath characterization describes.
+
     Note the real-time budget MOVES with cp: it is frame_samples / 20 MSps,
     and a longer CP means more samples per frame, so more wall-clock to
     process it. cp=64 is therefore easier to hit than cp=32 at the same
@@ -139,26 +147,32 @@ def _parse_args():
     sdu_bits = 24000
     modem_scheme = "qpsk"
     cp_len = CP_LEN_DEFAULT
+    dmrs_interval = 0
     for arg in sys.argv[1:]:
         low = arg.lower()
         if arg.isdigit():
             sdu_bits = int(arg)
         elif low.startswith("cp=") and low[3:].isdigit():
             cp_len = int(low[3:])
+        elif low.startswith("dmrs=") and low[5:].isdigit():
+            dmrs_interval = int(low[5:])
         elif low in _VALID_MODEMS:
             modem_scheme = low
         else:
             raise SystemExit(
                 f"Unrecognized argument {arg!r} -- expected a bit count (e.g. 32000), "
-                f"a cyclic prefix (e.g. cp=64), or a modem scheme "
-                f"(one of {sorted(_VALID_MODEMS)})"
+                f"a cyclic prefix (e.g. cp=64), a DMRS interval (e.g. dmrs=32), "
+                f"or a modem scheme (one of {sorted(_VALID_MODEMS)})"
             )
     if not 0 <= cp_len < FFT_SIZE:
         raise SystemExit(f"cp={cp_len} must be in [0, fft_size={FFT_SIZE})")
-    return sdu_bits, modem_scheme, cp_len
+    if dmrs_interval not in (0, 16, 32, 64):
+        raise SystemExit(f"dmrs={dmrs_interval} must be one of 0/16/32/64 "
+                         f"(the 2-bit wire codes -- see framing/dmrs.py)")
+    return sdu_bits, modem_scheme, cp_len, dmrs_interval
 
 
-SDU_BITS, MODEM_SCHEME, CP_LEN = _parse_args()
+SDU_BITS, MODEM_SCHEME, CP_LEN, DMRS_INTERVAL = _parse_args()
 
 
 def _pin_to_one_core() -> str:
@@ -262,12 +276,13 @@ def run() -> None:
         modem=MODEM_SCHEME, fec="rs_m8", fec1="conv_v27", crc="crc16",
         sync="schmidl_cox", cfo="schmidl_cox",
         channel_estimator="ls", equalizer="mmse",
+        dmrs_interval=DMRS_INTERVAL,
         backend="numpy",
     )
     print(f"=== v3 (stopwatch-timed stage breakdown -- spectracuda's own transparent "
           f"native/Numba acceleration, whatever's actually active on THIS machine) config: "
           f"fft_size={FFT_SIZE}, n_pilot={N_PILOT}, n_data={N_DATA}, cp_len={CP_LEN}, "
-          f"modem={MODEM_SCHEME}, fec='rs_m8' (inner), fec1='conv_v27' (outer), crc=crc16, "
+          f"modem={MODEM_SCHEME}, dmrs_interval={DMRS_INTERVAL}, fec='rs_m8' (inner), fec1='conv_v27' (outer), crc=crc16, "
           f"sync=schmidl_cox, cfo=schmidl_cox, channel_estimator=ls, equalizer=mmse, "
           f"backend=numpy, sdu_bits={SDU_BITS} ===")
     print(f"    native FEC backend (Viterbi/RS, C, transparent, fec/_native.py): "
