@@ -1,9 +1,9 @@
 # RX modular architecture — time / frequency / bit domain
 
 Status: **INTERFACES FROZEN (I1, I2, C1, symbol-type enum), 2026-10-03.**
-Implementation has not started. No RTL has been changed to match this
-document yet. See §5 H11: the baseline fails at realistic input rates,
-which blocks the C=10 regression until it is resolved.
+The stage refactor has not started. H11 (rate dependence) and H12 (CFO
+never applied) are FIXED in the time domain; the receiver is now
+bit-exact against Python and rate-invariant at C = 1, 2.5, 5, 10, 20.
 
 Baseline it refers to: branch `HDL_SPECTRA`, commit `c180a3a`
 (`hls/rtl/src/`). That commit is bit-exact against spectracuda at
@@ -24,7 +24,23 @@ payload CRC and the MAC stay on the host. Nothing here changes that.
 > configuration interface. A stage's internal FSM state never leaks into
 > another stage.**
 
-Every design choice below is a consequence of that rule. Two corollaries:
+### Rule 0: work only on valid input, at any rate
+
+> **A block does work only when its input is valid. When no sample is
+> present it does nothing and waits. Missing samples may only DELAY the
+> output, never change it.**
+
+The same frame fed at any input rate must give **bit-identical output**:
+C = 1, 2.5, 5, 10, 20 clocks per sample (40, 20, 10, 5 Msps at 100 MHz,
+plus the 1 sample/clock stress rate). Every block must also still sustain
+1 sample/clock: that capacity is what lets 40 Msps fit in 100 MHz.
+
+The original RTL broke this in `frame_sync` (H11): replay ran at one
+sample per clock and two delay compensations counted clocks as samples.
+It was correct only at C=1, the only rate ever simulated. The
+rate-invariance matrix (§10) now runs every frame config at every C.
+
+Every design choice below is a consequence of the main rule. Two corollaries:
 
 - No stage may rely on "N clocks after X, Y will have happened" about
   another stage. If it needs to know something, it must be carried as
@@ -199,8 +215,38 @@ assumptions in `frame_sync.v`:
 - `cand_idx_now = wr − (2·LAG + SC_LATENCY)` subtracts `sc_sync`'s 3-*clock*
   pipeline as 3 *samples*. Those are equal only at C=1.
 
-Nothing downstream of TD has ever been exercised at C>1 either. The C=10
-functional regression cannot start until this is resolved (§11).
+Nothing downstream of TD has ever been exercised at C>1 either.
+
+**FIXED 2026-10-03** (`frame_sync.v`): replay emits only written samples
+(`rd != wr`); the start index uses `wr` delayed by `SC_LATENCY` clocks; the
+R/index delay line beside the free-running CORDIC now advances every clock
+too (it advanced on `sc_valid`, a third clock-vs-sample mismatch). C=1 is
+unchanged.
+
+**H12. CFO correction was never applied (found and FIXED 2026-10-03).**
+`cfo_estimate` registers `d_phase` on its `out_valid` edge, and
+`cfo_correct` latched `d_phase` in that same cycle, so it got the
+PREVIOUS value: a single frame was never CFO-corrected, and back-to-back
+frames used the previous frame's estimate. It was masked at CFO 0.05 (the
+training channel estimate plus pilot CPE absorb the drift). At CFO 0.3 the
+old RTL failed outright (header never decoded) even at C=1 while Python
+decoded. `check_chain.py` missed it because its CFO test drives `d_phase`
+directly. Also, `cfo_estimate` sampled whatever P sc_sync emitted on the
+detection clock, which depended on the input rate. Fixes in
+`frame_sync.v` / `rx_time_domain.v`:
+- P of the ACCEPTED candidate rides the R/index delay line and is passed
+  with `detected` (Python uses P at `start_index`);
+- `cfo_correct` loads the estimate one cycle later (`cfo_loaded`);
+- replay waits for `cfo_loaded`, so phase zero is the frame's first
+  sample at any input rate.
+
+**Proof:** 9 frame configs (incl. CFO 0.3, and CFO 0.2 at EVM 0.08) × C =
+1, 2.5, 5, 10, 20: all 45 bit-exact against Python, and the FFT output
+(I1) is bit-identical across all five rates for every config.
+`check_chain.py` 11/11. Post-route WNS +0.149 ns, 13,582 LUT.
+
+Because H12 changes the FFT values at C=1, the frozen-RTL reference
+dumps (§10) come from this fixed RTL, not from `c180a3a`.
 
 ---
 
@@ -541,10 +587,9 @@ Each step ends with the stage testbench plus the end-to-end regression,
 bit-exact. No algorithm, width or rounding changes until step 6 is done.
 
 1. ✅ Mapping (this document §1–6).
-2. ✅ Interfaces frozen (§7). Remaining in this step: `rx_stype.vh` (3-bit
-   enum) + `rx_if.vh` (interface widths); frozen-RTL dumps at I1/I2 from
-   `c180a3a` (C=1, the only rate the baseline works at).
-   **Blocked on H11 for C=10.**
+2. ✅ Interfaces frozen (§7), `rx_if.vh` added. ✅ H11 + H12 fixed.
+   Remaining: frozen-RTL dumps at I1/I2 from the fixed RTL, at C=1 and
+   C=10.
 3. **FD**: I1 in, I2 out; B1 + classify (all BODY → DATA); metadata
    through `grid_extract`/`ls_chanest`/`mmse_eq`/`pilot_cpe`; demapper moves
    in with BPSK; B2. `tb_rx_freq_domain`.

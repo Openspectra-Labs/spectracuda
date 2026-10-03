@@ -1523,6 +1523,10 @@ wrong fix.
 
 ### Three caveats on "the front end does 1 sample/clock"
 
+- **FIXED 2026-10-03 -- see docs/rx_modular_architecture.md H11/H12.**
+  The receiver is now rate-invariant (identical FFT output at C = 1, 2.5,
+  5, 10, 20) and the CFO estimate is actually applied (it never was).
+  Original note kept below for history.
 - **`frame_sync` only works at 1 sample/clock.** Its `S_REPLAY` branch
   emits one sample per clock with no `in_valid` guard, while writes
   advance only on `in_valid`. So this is the single rate it handles

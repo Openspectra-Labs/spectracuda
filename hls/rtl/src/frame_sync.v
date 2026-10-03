@@ -81,7 +81,18 @@ module frame_sync #(
     output reg                         out_valid,
     output reg                         frame_start,   // with the first sample
     output reg                         detected,      // pulses on acceptance
-    output reg  [BUF_W-1:0]            start_index
+    output reg  [BUF_W-1:0]            start_index,
+    // P of the ACCEPTED candidate (start_index), valid with `detected`.
+    // This is the P Python's CFO estimate uses (cfo/_numba_schmidl_cox.py:
+    // _estimate_row at d = start_index) -- not whatever sc_sync happens
+    // to be emitting on the clock detection is declared, which depended
+    // on the input rate.
+    output reg  signed [ACC_W-1:0]     det_p_re,
+    output reg  signed [ACC_W-1:0]     det_p_im,
+    // Pulse: this frame's CFO correction is loaded. Replay waits for it,
+    // so the correction's phase origin is the frame's first sample at
+    // any input rate.
+    input  wire                        cfo_loaded
 );
     localparam integer LAG   = `SC_LAG;          // fft_size/2
     localparam integer DEPTH = 1 << BUF_W;
@@ -112,15 +123,36 @@ module frame_sync #(
         .out_angle(), .out_mag(mag), .out_valid(mag_valid));
 
     // R and the candidate index have to arrive with the magnitude, so
-    // they ride a delay line of the same depth, advanced by the same
-    // enable that feeds the CORDIC.
+    // they ride a delay line of the same depth. cordic_vec's pipeline
+    // advances EVERY CLOCK (its valid bit just rides along), so this line
+    // must too. It used to advance only on sc_valid: identical when a
+    // sample arrives every clock, misaligned by the gaps otherwise.
     wire signed [ACC_W-1:0] r_half = r_sum >>> 1;
     reg  signed [ACC_W-1:0] r_pipe   [0:VEC_LAT-1];
     reg         [BUF_W-1:0] idx_pipe [0:VEC_LAT-1];
+    reg  signed [ACC_W-1:0] pre_pipe [0:VEC_LAT-1];
+    reg  signed [ACC_W-1:0] pim_pipe [0:VEC_LAT-1];
 
-    // Candidate d's first sample sits 2*LAG writes back, plus sc_sync's
-    // own 3-stage pipeline.
-    wire [BUF_W-1:0] cand_idx_now = wr - BUF_W'(2*LAG + SC_LATENCY);
+    // Candidate d's first sample sits 2*LAG writes back from where `wr`
+    // stood when sc_sync took the sample in.
+    //
+    // RATE-INDEPENDENT. sc_sync's pipeline is SC_LATENCY *clocks* deep
+    // and runs every clock. The old form, `wr - (2*LAG + SC_LATENCY)`,
+    // subtracted those clocks as if they were samples -- true only when
+    // a sample arrives every clock. Delaying `wr` itself by SC_LATENCY
+    // clocks gives the pointer as it was when the sample entered, at any
+    // input rate, and is the identical value at 1 sample/clock.
+    reg [BUF_W-1:0] wr_d [0:SC_LATENCY-1];
+    integer j;
+    always @(posedge clk) begin
+        if (rst) begin
+            for (j = 0; j < SC_LATENCY; j = j + 1) wr_d[j] <= {BUF_W{1'b0}};
+        end else begin
+            wr_d[0] <= wr;
+            for (j = 1; j < SC_LATENCY; j = j + 1) wr_d[j] <= wr_d[j-1];
+        end
+    end
+    wire [BUF_W-1:0] cand_idx_now = wr_d[SC_LATENCY-1] - BUF_W'(2*LAG);
 
     integer k;
     always @(posedge clk) begin
@@ -128,19 +160,27 @@ module frame_sync #(
             for (k = 0; k < VEC_LAT; k = k + 1) begin
                 r_pipe[k]   <= {ACC_W{1'b0}};
                 idx_pipe[k] <= {BUF_W{1'b0}};
+                pre_pipe[k] <= {ACC_W{1'b0}};
+                pim_pipe[k] <= {ACC_W{1'b0}};
             end
-        end else if (sc_valid) begin
+        end else begin
             r_pipe[0]   <= r_half;
             idx_pipe[0] <= cand_idx_now;
+            pre_pipe[0] <= p_re;
+            pim_pipe[0] <= p_im;
             for (k = 1; k < VEC_LAT; k = k + 1) begin
                 r_pipe[k]   <= r_pipe[k-1];
                 idx_pipe[k] <= idx_pipe[k-1];
+                pre_pipe[k] <= pre_pipe[k-1];
+                pim_pipe[k] <= pim_pipe[k-1];
             end
         end
     end
 
     wire signed [ACC_W-1:0] r_now   = r_pipe[VEC_LAT-1];
     wire        [BUF_W-1:0] cand_idx = idx_pipe[VEC_LAT-1];
+    wire signed [ACC_W-1:0] cand_pre = pre_pipe[VEC_LAT-1];
+    wire signed [ACC_W-1:0] cand_pim = pim_pipe[VEC_LAT-1];
 
     // K*sqrt(0.3)*R as shifts: 1/2 + 1/4 + 1/8 + 1/32.
     //
@@ -161,6 +201,7 @@ module frame_sync #(
     reg  signed [ACC_W+1:0] thresh, mag_q;
     reg                     mag_valid_q;
     reg         [BUF_W-1:0] cand_idx_q;
+    reg  signed [ACC_W-1:0] cand_pre_q, cand_pim_q;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -168,11 +209,15 @@ module frame_sync #(
             mag_q       <= {(ACC_W+2){1'b0}};
             mag_valid_q <= 1'b0;
             cand_idx_q  <= {BUF_W{1'b0}};
+            cand_pre_q  <= {ACC_W{1'b0}};
+            cand_pim_q  <= {ACC_W{1'b0}};
         end else begin
             thresh      <= thresh_c;
             mag_q       <= mag;
             mag_valid_q <= mag_valid;
             cand_idx_q  <= cand_idx;
+            cand_pre_q  <= cand_pre;
+            cand_pim_q  <= cand_pim;
         end
     end
 
@@ -186,11 +231,12 @@ module frame_sync #(
     wire better = mag_q > best_mag;
 
     // ---- SEEKING / REPLAY ------------------------------------------------
-    localparam S_SEEK = 1'b0, S_REPLAY = 1'b1;
-    reg state;
+    localparam [1:0] S_SEEK = 2'd0, S_WAIT_CFO = 2'd1, S_REPLAY = 2'd2;
+    reg [1:0] state;
 
     reg signed [ACC_W+1:0] best_mag;
     reg [BUF_W-1:0] best_idx;
+    reg signed [ACC_W-1:0] best_pre, best_pim;
     reg             have_best;
     reg [BUF_W-1:0] since_best;     // candidates seen since the current best
     reg [BUF_W-1:0] rd;
@@ -201,6 +247,10 @@ module frame_sync #(
             state       <= S_SEEK;
             best_mag    <= {(ACC_W+2){1'b0}};
             best_idx    <= {BUF_W{1'b0}};
+            best_pre    <= {ACC_W{1'b0}};
+            best_pim    <= {ACC_W{1'b0}};
+            det_p_re    <= {ACC_W{1'b0}};
+            det_p_im    <= {ACC_W{1'b0}};
             have_best   <= 1'b0;
             since_best  <= {BUF_W{1'b0}};
             rd          <= {BUF_W{1'b0}};
@@ -220,6 +270,8 @@ module frame_sync #(
                     if (over_thresh && (!have_best || better)) begin
                         best_mag   <= mag_q;
                         best_idx   <= cand_idx_q;
+                        best_pre   <= cand_pre_q;
+                        best_pim   <= cand_pim_q;
                         have_best  <= 1'b1;
                         since_best <= {BUF_W{1'b0}};
                     end else if (have_best) begin
@@ -229,15 +281,28 @@ module frame_sync #(
                         if (since_best == BUF_W'(LAG-1)) begin
                             detected    <= 1'b1;
                             start_index <= best_idx;
+                            det_p_re    <= best_pre;
+                            det_p_im    <= best_pim;
                             rd          <= best_idx;
                             replay_cnt  <= 16'd0;
-                            state       <= S_REPLAY;
+                            state       <= S_WAIT_CFO;
                         end
                     end
                 end
             end
 
-            S_REPLAY: begin
+            // Hold the replay until this frame's CFO correction is loaded,
+            // so cfo_correct's phase origin is the frame's first sample.
+            // ~20 clocks; the ring keeps filling meanwhile.
+            S_WAIT_CFO: if (cfo_loaded) state <= S_REPLAY;
+
+            // Replay a sample only once it has been WRITTEN (rd != wr).
+            // With a sample every clock the reader trails the writer by
+            // the detection delay and this is always true, so nothing
+            // changes. At any slower input rate the reader catches up and
+            // then follows the writer one sample at a time -- previously
+            // it ran on at one per clock and replayed empty slots.
+            S_REPLAY: if (rd != wr) begin
                 out_i       <= buf_i[rd];
                 out_q       <= buf_q[rd];
                 out_valid   <= 1'b1;
@@ -252,6 +317,7 @@ module frame_sync #(
                     replay_cnt <= replay_cnt + 1'b1;
                 end
             end
+            default: state <= S_SEEK;
             endcase
         end
     end

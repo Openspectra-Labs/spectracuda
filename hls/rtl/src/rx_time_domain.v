@@ -77,7 +77,8 @@ module rx_time_domain #(
         .clk(clk), .rst(rst), .in_i(in_i), .in_q(in_q), .in_valid(in_valid),
         .p_re(p_re), .p_im(p_im), .r_sum(r_sum), .sc_valid(sc_valid),
         .out_i(fs_i), .out_q(fs_q), .out_valid(fs_valid),
-        .frame_start(fs_start), .detected(fs_detected), .start_index(fs_index));
+        .frame_start(fs_start), .detected(fs_detected), .start_index(fs_index),
+        .det_p_re(det_p_re), .det_p_im(det_p_im), .cfo_loaded(cfo_loaded));
 
     // ---------------------------------------------------------------
     // 2. CFO: estimated once from the winning P, applied to the replay
@@ -87,9 +88,24 @@ module rx_time_domain #(
     wire signed [ANGLE_W-1:0] cfo_angle, cfo_dphase;
     wire cfo_angle_valid;
 
+    // P of the accepted candidate, from frame_sync (see its port comment).
+    wire signed [ACC_W-1:0] det_p_re, det_p_im;
+
+    // cfo_estimate registers d_phase ON its out_valid edge, so in the
+    // out_valid cycle d_phase still holds the PREVIOUS frame's value.
+    // cfo_correct used to latch it right then: a single frame was never
+    // CFO-corrected at all, and back-to-back frames were corrected with
+    // the previous frame's estimate. One cycle later d_phase is the new
+    // value. frame_sync waits for this pulse before replaying.
+    reg cfo_loaded;
+    always @(posedge clk) begin
+        if (rst) cfo_loaded <= 1'b0;
+        else     cfo_loaded <= cfo_angle_valid;
+    end
+
     cfo_estimate #(.ACC_W(ACC_W), .ANGLE_W(ANGLE_W)) u_cfo_est (
         .clk(clk), .rst(rst),
-        .p_re(p_re), .p_im(p_im), .p_valid(fs_detected),
+        .p_re(det_p_re), .p_im(det_p_im), .p_valid(fs_detected),
         .angle_turns(cfo_angle), .d_phase(cfo_dphase),
         .out_valid(cfo_angle_valid));
 
@@ -127,7 +143,7 @@ module rx_time_domain #(
     cfo_correct #(.SAMPLE_W(SAMPLE_W), .ANGLE_W(ANGLE_W)) u_cfo_cor (
         .clk(clk), .rst(rst),
         .in_i(fsq_i), .in_q(fsq_q), .in_valid(fsq_valid),
-        .d_phase(cfo_dphase), .d_phase_valid(cfo_angle_valid),
+        .d_phase(cfo_dphase), .d_phase_valid(cfo_loaded),
         .out_i(cor_i), .out_q(cor_q), .out_valid(cor_valid));
 
     // ---------------------------------------------------------------

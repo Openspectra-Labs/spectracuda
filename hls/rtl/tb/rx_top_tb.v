@@ -1,8 +1,13 @@
 `timescale 1ns / 1ps
 `include "build/rxtop_tb_params.vh"
-// Older harnesses (exp_*.py) do not set the input rate: default 1.
-`ifndef RXT_CPS
-`define RXT_CPS 1
+// Input rate, as a fraction: C = RXT_CPS_NUM / RXT_CPS_DEN clocks per
+// sample (e.g. 5/2 = 2.5 for 40 Msps at 100 MHz). Older harnesses
+// (exp_*.py) set neither: default 1 sample/clock.
+`ifndef RXT_CPS_NUM
+`define RXT_CPS_NUM 1
+`endif
+`ifndef RXT_CPS_DEN
+`define RXT_CPS_DEN 1
 `endif
 
 module rx_top_tb;
@@ -30,6 +35,17 @@ module rx_top_tb;
         .crc_code(crc_code), .out_unit(out_unit),
         .out_unit_valid(out_unit_valid), .frame_done(frame_done),
         .fifo_overflow(fifo_ovf));
+
+    // Optional I1 dump (FFT output, one bin per line) for the
+    // rate-invariance check: the same frame must give identical bins at
+    // every clocks-per-sample ratio. Set by run_frame.py --dump-i1.
+`ifdef RXT_I1_PATH
+    integer fi1;
+    initial fi1 = $fopen(`RXT_I1_PATH, "w");
+    always @(posedge clk)
+        if (!rst && dut.fft_valid)
+            $fwrite(fi1, "%0d %0d\n", $signed(dut.fft_re), $signed(dut.fft_im));
+`endif
 
     reg [31:0] stim [0:NSAMP-1];
     integer fd, fu, i, nunits;
@@ -59,14 +75,15 @@ module rx_top_tb;
         repeat (8) @(posedge clk);
         rst = 0;
         @(posedge clk);
-        // RXT_CPS = clocks per input sample (C). 1 is the stress rate;
-        // 10 is 10 Msps at 100 MHz. in_valid is high one cycle in C.
+        // Sample i occupies floor((i+1)C) - floor(iC) clocks: one with
+        // in_valid high, the rest idle. Integer C gives a fixed pattern,
+        // fractional C (2.5) alternates 2 and 3.
         for (i = 0; i < NSAMP; i = i + 1) begin
             @(negedge clk);
             in_i     = stim[i][31:16];
             in_q     = stim[i][15:0];
             in_valid = 1'b1;
-            repeat (`RXT_CPS - 1) begin
+            repeat (((i+1)*`RXT_CPS_NUM)/`RXT_CPS_DEN - (i*`RXT_CPS_NUM)/`RXT_CPS_DEN - 1) begin
                 @(negedge clk);
                 in_valid = 1'b0;
             end

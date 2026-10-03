@@ -22,6 +22,9 @@ module frame_sync_tb;
 
     wire signed [SAMPLE_W-1:0] o_i, o_q;
     wire o_v, f_start, det;
+    // No CFO block here: report it "loaded" the clock after detection,
+    // so the replay is released straight away.
+    reg cfo_l = 1'b0;
     wire [11:0] sidx;
 
     frame_sync #(.SAMPLE_W(SAMPLE_W), .ACC_W(ACC_W), .BUF_W(12),
@@ -29,7 +32,10 @@ module frame_sync_tb;
         .clk(clk), .rst(rst), .in_i(in_i), .in_q(in_q), .in_valid(in_valid),
         .p_re(p_re), .p_im(p_im), .r_sum(r_sum), .sc_valid(sc_v),
         .out_i(o_i), .out_q(o_q), .out_valid(o_v),
-        .frame_start(f_start), .detected(det), .start_index(sidx));
+        .frame_start(f_start), .detected(det), .start_index(sidx),
+        .det_p_re(), .det_p_im(), .cfo_loaded(cfo_l));
+
+    always @(posedge clk) cfo_l <= det;
 
     reg [31:0] stim [0:NSAMP-1];
     integer fd, fm, i;
