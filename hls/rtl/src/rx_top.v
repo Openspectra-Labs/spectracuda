@@ -158,7 +158,7 @@ module rx_top #(
         .fft_re(fft_re), .fft_im(fft_im), .fft_valid(fft_valid),
         .fft_sof(fft_sof), .fft_stype(fft_stype), .fft_bin(fft_bin));
 
-    rx_freq_domain #(.FFT_W(FFT_W), .CE_IN_W(CE_IN_W), .EQ_W(EQ_W),
+    rx_freq_domain_legacy #(.FFT_W(FFT_W), .CE_IN_W(CE_IN_W), .EQ_W(EQ_W),
                      .ANGLE_W(ANGLE_W),
                      .SHIFT_FFT_TO_CE(SHIFT_FFT_TO_CE),
                      .SHIFT_FFT_TO_EQ(SHIFT_FFT_TO_EQ)) u_fd (
