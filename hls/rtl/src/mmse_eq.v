@@ -44,7 +44,10 @@
 module mmse_eq #(
     parameter integer W     = 18,    // rx and H, Q12
     parameter integer ACC_W = 40,
-    parameter integer PRD_W = 60
+    parameter integer PRD_W = 60,
+    // Sideband carried through the SAME six stages as the sample (e1..e5,
+    // y), so y_meta always belongs to y_re/y_im. Opaque here; >= 1 bit.
+    parameter integer META_W = 1
 )(
     input  wire                    clk,
     input  wire                    rst,
@@ -54,11 +57,14 @@ module mmse_eq #(
     input  wire signed [W-1:0]     h_re,
     input  wire signed [W-1:0]     h_im,
     input  wire                    in_valid,
+    input  wire [META_W-1:0]       in_meta,
 
     output reg  signed [W-1:0]     y_re,
     output reg  signed [W-1:0]     y_im,
-    output reg                     y_valid
+    output reg                     y_valid,
+    output reg  [META_W-1:0]       y_meta
 );
+    reg [META_W-1:0] e1_m, e2_m, e3_m, e4_m, e5_m;
 
     localparam integer LUT_N  = 1 << `EQ_LUT_BITS;
     localparam integer EXP_W  = 6;
@@ -120,12 +126,14 @@ module mmse_eq #(
             e1_ir    <= rx_im * h_re;
             e1_ri    <= rx_re * h_im;
             e1_v     <= in_valid;
+            e1_m     <= in_meta;
 
             // e2: rx * conj(H) = (rr + ii) + j(ir - ri)
             e2_den    <= e1_hh_re + e1_hh_im + `EQ_NOISE_VAR_Q24;
             e2_num_re <= e1_rr + e1_ii;
             e2_num_im <= e1_ir - e1_ri;
             e2_v      <= e1_v;
+            e2_m      <= e1_m;
 
             // e3
             e3_exp    <= msb;
@@ -133,6 +141,7 @@ module mmse_eq #(
             e3_num_re <= e2_num_re;
             e3_num_im <= e2_num_im;
             e3_v      <= e2_v;
+            e3_m      <= e2_m;
 
             // e4
             e4_recip  <= recip_rom[e3_idx];
@@ -140,17 +149,20 @@ module mmse_eq #(
             e4_num_re <= e3_num_re;
             e4_num_im <= e3_num_im;
             e4_v      <= e3_v;
+            e4_m      <= e3_m;
 
             // e5
             e5_re  <= e4_num_re * $signed({1'b0, e4_recip});
             e5_im  <= e4_num_im * $signed({1'b0, e4_recip});
             e5_exp <= e4_exp;
             e5_v   <= e4_v;
+            e5_m   <= e4_m;
 
             // e6
             y_re    <= (e5_re >>> (`EQ_OUT_SHIFT + e5_exp));
             y_im    <= (e5_im >>> (`EQ_OUT_SHIFT + e5_exp));
             y_valid <= e5_v;
+            y_meta  <= e5_m;
         end
     end
     /* verilator lint_on WIDTHTRUNC */

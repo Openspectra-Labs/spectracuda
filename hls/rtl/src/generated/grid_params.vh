@@ -24,5 +24,6 @@
 // |sum| gate, same decision, K=1.646760 folded in
 `define GRID_CPE_THRESH_MAG 2698
 `define GRID_TYPE_MEM "/home/abhi/work/spectracuda/hls/rtl/src/generated/grid_type.mem"
+`define GRID_ORD_MEM "/home/abhi/work/spectracuda/hls/rtl/src/generated/grid_ord.mem"
 
 `endif

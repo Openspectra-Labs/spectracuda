@@ -601,7 +601,13 @@ bit-exact. No algorithm, width or rounding changes until step 6 is done.
    ✅ Reference dumps at I1/I2/C1/O1 in `hls/rtl/golden_if/` (7 frames,
    each bit-exact vs Python and byte-identical at C=1 and C=10; formats in
    its README). Captured by `capture_golden.sh` + `tb/capture_taps.vh`.
-3. **FD**: I1 in, I2 out; B1 + classify (all BODY → DATA); metadata
+3. ✅ **3a** (metadata through the reusable blocks, no behaviour change):
+   `grid_extract` stateless on `in_bin` + `sc` from generated `grid_ord.mem`;
+   metadata pipelines in `mmse_eq` and `demapper`; demapper BPSK mode
+   (`DM_BPSK`); `ls_chanest.h_bin`; `cp_fft.out_bin`. Gate: `check_chain`
+   11/11 with metadata assertions, `check_golden.sh` 14/14 byte-identical
+   to golden_if/ at C=1 and C=10, `rate_matrix.sh` 45/45.
+   **FD**: I1 in, I2 out; B1 + classify (all BODY → DATA); metadata
    through `grid_extract`/`ls_chanest`/`mmse_eq`/`pilot_cpe`; demapper moves
    in with BPSK; B2. `tb_rx_freq_domain`.
 4. **BD**: I2 in; header parser on `stype=HEADER`; config publisher (C1);

@@ -58,7 +58,8 @@ module rx_bit_decoder #(
         .clk(clk), .rst(rst),
         .y_re(cpe_re), .y_im(cpe_im), .mod_scheme(dm_scheme),
         .in_valid(cpe_out_valid),
-        .bits(dm_bits), .n_bits(dm_nbits), .out_valid(dm_valid));
+        .bits(dm_bits), .n_bits(dm_nbits), .out_valid(dm_valid),
+        .in_meta(1'b0), .out_meta());
 
     // ---- coded-bit FIFO, WORD-WIDE ---------------------------------
     // Stores one demapper output per entry, NOT one bit. A 1-bit-wide

@@ -33,7 +33,7 @@ module cp_fft_tb;
         .clk(clk), .rst(rst),
         .in_i(in_i), .in_q(in_q), .in_valid(in_valid), .sof(sof), .in_stype(2'd0),
         .out_re(out_re), .out_im(out_im),
-        .out_valid(out_valid), .out_last(out_last), .out_sof(), .out_stype(), .overflow(overflow)
+        .out_valid(out_valid), .out_last(out_last), .out_sof(), .out_stype(), .out_bin(), .overflow(overflow)
     );
 
     reg [31:0] stim [0:N_IN-1];

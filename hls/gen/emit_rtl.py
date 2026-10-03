@@ -184,6 +184,24 @@ def emit_grid(ofdm: Ofdm, out_dir: str) -> list:
         for t in sctype:
             f.write(f"{t:01x}\n")
 
+    # Per-bin ORDINAL: a data bin's index among the data bins, a pilot
+    # bin's among the pilots (null bins: 0). grid_extract.v emits it as
+    # `sc` with each item, so H storage and everything downstream address
+    # by metadata instead of counting items (docs/rx_modular_architecture.md
+    # H6). Ordinals follow ascending bin order -- the order grid_extract
+    # emits in -- which must also be Python's order, or the RTL's stream
+    # and extract_data()'s columns would disagree.
+    if not (_np.all(_np.diff(datas) > 0) and _np.all(_np.diff(pilots) > 0)):
+        raise ValueError("data/pilot indices are not ascending; grid_ord.mem "
+                         "ordinals would not match Python's column order")
+    ordv = _np.zeros(n_fft, dtype=int)
+    ordv[datas] = _np.arange(len(datas))
+    ordv[pilots] = _np.arange(len(pilots))
+    ord_mem = os.path.join(out_dir, "grid_ord.mem")
+    with open(ord_mem, "w") as f:
+        for o in ordv:
+            f.write(f"{o:02x}\n")
+
     pv = _np.asarray(ofdm.pilot_values).ravel()
     uniform = bool(_np.all(pv == pv[0]))
     if not uniform:
@@ -239,9 +257,10 @@ def emit_grid(ofdm: Ofdm, out_dir: str) -> list:
         tmag = int(round(K * thresh * len(pilots) * (1 << frac)))
         f.write(f"// |sum| gate, same decision, K={K:.6f} folded in\n")
         f.write(f"`define GRID_CPE_THRESH_MAG {tmag}\n")
-        f.write(f'`define GRID_TYPE_MEM "{mem}"\n\n')
+        f.write(f'`define GRID_TYPE_MEM "{mem}"\n')
+        f.write(f'`define GRID_ORD_MEM "{ord_mem}"\n\n')
         f.write("`endif\n")
-    return [hdr, mem]
+    return [hdr, mem, ord_mem]
 
 
 def emit_header(ofdm: Ofdm, out_dir: str) -> list:
@@ -595,6 +614,12 @@ def emit_demap(ofdm: Ofdm, out_dir: str) -> list:
                 f"`define DM_{u}_MAXLVL {m - 1}\n"
                 f"`define DM_{u}_SCALE 32'sd{scale_q}\n"
                 f"`define DM_{u}_BIAS 64'sd{bias_q}\n")
+    # BPSK is used only by the header. Its hard decision is the sign of the
+    # real part, bit = ~sign(re) -- the same decision rx_top made inline
+    # before the header moved onto the demapper (docs/rx_modular_architecture.md
+    # step 3). No scale/bias: nothing is quantized.
+    hdr += ("\n// header only: bit = ~sign(re), one bit per subcarrier\n"
+            "`define DM_BPSK 3\n")
     hdr += "\n`endif\n"
     path = os.path.join(out_dir, "demap_params.vh")
     with open(path, "w") as f:

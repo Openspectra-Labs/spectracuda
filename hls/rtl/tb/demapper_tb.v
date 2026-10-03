@@ -20,10 +20,24 @@ module demapper_tb;
     wire [3:0]          n_bits;
     wire                out_valid;
 
-    demapper #(.W(W)) dut (
+    // Metadata check (step 3a): sequence-tag every input; outputs must
+    // carry the tags in order.
+    reg  [15:0] in_meta = 16'd0;
+    wire [15:0] out_meta;
+    integer exp_m = 0;
+    always @(posedge clk) begin
+        if (in_valid) in_meta <= in_meta + 1'b1;
+        if (out_valid) begin
+            if (out_meta != exp_m[15:0])
+                $fatal(1, "demapper: out_meta=%0d, want %0d", out_meta, exp_m);
+            exp_m = exp_m + 1;
+        end
+    end
+
+    demapper #(.W(W), .META_W(16)) dut (
         .clk(clk), .rst(rst), .y_re(y_re), .y_im(y_im),
-        .mod_scheme(SCHEME), .in_valid(in_valid),
-        .bits(bits), .n_bits(n_bits), .out_valid(out_valid)
+        .mod_scheme(SCHEME), .in_valid(in_valid), .in_meta(in_meta),
+        .bits(bits), .n_bits(n_bits), .out_valid(out_valid), .out_meta(out_meta)
     );
 
     reg [35:0] stim [0:N-1];

@@ -64,6 +64,7 @@ module cp_fft #(
     output wire                       out_valid,
     output wire                       out_last,
     output wire                       out_sof,     // first bin of a symbol
+    output wire [7:0]                 out_bin,     // natural-order bin index
     output wire [1:0]                 out_stype,   // that symbol's tag
 
     output reg                        overflow
@@ -195,6 +196,17 @@ module cp_fft #(
     end
 
     assign out_sof   = m_tvalid && out_first;
+
+    // Bin index of the current output beat. The core emits natural order,
+    // 0..FFT_SIZE-1 per frame, ending on tlast -- so this is the FFT's own
+    // framing turned into metadata, generated here once rather than
+    // re-counted by every consumer.
+    reg [7:0] obin;
+    always @(posedge clk) begin
+        if (rst)           obin <= 8'd0;
+        else if (m_tvalid) obin <= m_tlast ? 8'd0 : obin + 1'b1;
+    end
+    assign out_bin = obin;
     // Valid on EVERY bin of the symbol, not just bin 0, so no consumer
     // has to latch it.
     assign out_stype = out_first ? tag_mem[tag_rd] : cur_stype;

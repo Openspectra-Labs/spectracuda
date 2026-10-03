@@ -4,6 +4,7 @@
 // LSChannelEstimator.
 `timescale 1ns / 1ps
 `include "build/ce_params.vh"
+`include "chanest_params.vh"
 
 module ls_chanest_tb;
     localparam integer IN_W = 20, H_W = 18;
@@ -17,11 +18,22 @@ module ls_chanest_tb;
     wire signed [H_W-1:0]  h_re, h_im;
     wire                   h_valid, h_last;
 
+    wire [7:0] h_bin;
     ls_chanest #(.IN_W(IN_W), .H_W(H_W)) dut (
         .clk(clk), .rst(rst),
         .pilot_re(pilot_re), .pilot_im(pilot_im), .pilot_valid(pilot_valid),
-        .h_re(h_re), .h_im(h_im), .h_valid(h_valid), .h_last(h_last)
+        .h_re(h_re), .h_im(h_im), .h_valid(h_valid), .h_last(h_last),
+        .h_bin(h_bin)
     );
+
+    // h_bin check (step 3a): must count 0..N_FFT-1 with the outputs and
+    // be N_FFT-1 exactly when h_last is high.
+    integer exp_b = 0;
+    always @(posedge clk) if (h_valid) begin
+        if (h_bin != exp_b[7:0] || h_last != (exp_b == `CE_N_FFT - 1))
+            $fatal(1, "ls_chanest: h_bin=%0d last=%0d, want %0d", h_bin, h_last, exp_b);
+        exp_b = (exp_b == `CE_N_FFT - 1) ? 0 : exp_b + 1;
+    end
 
     reg [39:0] stim [0:N_IN-1];
     integer fd, i, got = 0, saw_last = 0;

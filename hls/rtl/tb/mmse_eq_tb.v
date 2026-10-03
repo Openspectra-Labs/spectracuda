@@ -15,10 +15,25 @@ module mmse_eq_tb;
     wire signed [W-1:0] y_re, y_im;
     wire                y_valid;
 
-    mmse_eq #(.W(W)) dut (
+    // Metadata check (step 3a): tag every input with its sequence number;
+    // each output must carry the next number, in order.
+    reg  [15:0] in_meta = 16'd0;
+    wire [15:0] y_meta;
+    integer exp_m = 0;
+    always @(posedge clk) begin
+        if (in_valid) in_meta <= in_meta + 1'b1;
+        if (y_valid) begin
+            if (y_meta != exp_m[15:0])
+                $fatal(1, "mmse_eq: y_meta=%0d, want %0d", y_meta, exp_m);
+            exp_m = exp_m + 1;
+        end
+    end
+
+    mmse_eq #(.W(W), .META_W(16)) dut (
         .clk(clk), .rst(rst),
         .rx_re(rx_re), .rx_im(rx_im), .h_re(h_re), .h_im(h_im),
-        .in_valid(in_valid), .y_re(y_re), .y_im(y_im), .y_valid(y_valid)
+        .in_valid(in_valid), .in_meta(in_meta),
+        .y_re(y_re), .y_im(y_im), .y_valid(y_valid), .y_meta(y_meta)
     );
 
     reg [71:0] stim [0:N-1];

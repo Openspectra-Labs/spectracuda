@@ -29,4 +29,7 @@
 `define DM_QAM64_SCALE 32'sd53090
 `define DM_QAM64_BIAS 64'sd268435456
 
+// header only: bit = ~sign(re), one bit per subcarrier
+`define DM_BPSK 3
+
 `endif

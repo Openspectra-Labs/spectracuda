@@ -137,6 +137,7 @@ module rx_top #(
     wire signed [FFT_W-1:0]  fft_re, fft_im;
     wire                     fft_valid, fft_sof;
     wire [1:0]               fft_stype;
+    wire [7:0]               fft_bin;
 
     wire                     hdr_bit, hdr_valid_bit, hdr_bit_sof;
     wire signed [EQ_W-1:0]   cpe_re, cpe_im;
@@ -155,7 +156,7 @@ module rx_top #(
         .n_pay_sym(n_pay_sym),
         .frame_start(frame_start),
         .fft_re(fft_re), .fft_im(fft_im), .fft_valid(fft_valid),
-        .fft_sof(fft_sof), .fft_stype(fft_stype));
+        .fft_sof(fft_sof), .fft_stype(fft_stype), .fft_bin(fft_bin));
 
     rx_freq_domain #(.FFT_W(FFT_W), .CE_IN_W(CE_IN_W), .EQ_W(EQ_W),
                      .ANGLE_W(ANGLE_W),
@@ -163,7 +164,7 @@ module rx_top #(
                      .SHIFT_FFT_TO_EQ(SHIFT_FFT_TO_EQ)) u_fd (
         .clk(clk), .rst(rst), .frame_start(frame_start),
         .fft_re(fft_re), .fft_im(fft_im), .fft_valid(fft_valid),
-        .fft_sof(fft_sof), .fft_stype(fft_stype),
+        .fft_sof(fft_sof), .fft_stype(fft_stype), .fft_bin(fft_bin),
         .hdr_bit(hdr_bit), .hdr_valid_bit(hdr_valid_bit),
         .hdr_bit_sof(hdr_bit_sof),
         .cpe_re(cpe_re), .cpe_im(cpe_im), .cpe_out_valid(cpe_out_valid));

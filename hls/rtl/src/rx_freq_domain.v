@@ -35,6 +35,7 @@ module rx_freq_domain #(
     input  wire                       fft_valid,
     input  wire                       fft_sof,
     input  wire [1:0]                 fft_stype,
+    input  wire [7:0]                 fft_bin,
 
     // Header symbol: one hard-decided BPSK bit per data subcarrier.
     output wire                       hdr_bit,
@@ -74,13 +75,13 @@ module rx_freq_domain #(
     wire op_hdr   = (g_stype == ST_HDR);
     wire op_pay   = (g_stype == ST_PAY);
 
-    grid_extract #(.DATA_W(FFT_W)) u_grid (
+    grid_extract #(.DATA_W(FFT_W), .META_W(2)) u_grid (
         .clk(clk), .rst(rst),
         .in_re(fft_re), .in_im(fft_im), .in_valid(fft_valid),
-        .sof(fft_sof), .in_stype(fft_stype),
+        .in_bin(fft_bin), .in_meta(fft_stype),
         .data_re(gd_re), .data_im(gd_im), .data_valid(gd_valid),
         .pilot_re(gp_re), .pilot_im(gp_im), .pilot_valid(gp_valid),
-        .sym_done(g_symdone), .out_stype(g_stype));
+        .out_sc(), .sym_done(g_symdone), .out_meta(g_stype));
 
     // Every occupied bin, data and pilot merged back in bin order --
     // what ls_chanest wants, since all 224 are known in a training
@@ -108,17 +109,15 @@ module rx_freq_domain #(
     wire signed [EQ_W-1:0] h_re, h_im;
     wire h_valid, h_last;
 
+    wire [7:0] h_bin;   // from ls_chanest (3a); the counter that was here is gone
+
     ls_chanest #(.IN_W(CE_IN_W), .H_W(EQ_W)) u_ce (
         .clk(clk), .rst(rst),
         .pilot_re(ce_in_re), .pilot_im(ce_in_im),
         .pilot_valid(known_valid && op_train),
-        .h_re(h_re), .h_im(h_im), .h_valid(h_valid), .h_last(h_last));
+        .h_re(h_re), .h_im(h_im), .h_valid(h_valid), .h_last(h_last),
+        .h_bin(h_bin));
 
-    reg [8:0] h_bin;
-    always @(posedge clk) begin
-        if (rst) h_bin <= 9'd0;
-        else if (h_valid) h_bin <= (h_bin == 9'(FFT_SIZE-1)) ? 9'd0 : h_bin + 1'b1;
-    end
 
     wire signed [EQ_W-1:0] hd_re, hd_im, hp_re, hp_im;
     wire hd_valid, hp_valid;
@@ -126,10 +125,10 @@ module rx_freq_domain #(
     grid_extract #(.DATA_W(EQ_W)) u_grid_h (
         .clk(clk), .rst(rst),
         .in_re(h_re), .in_im(h_im), .in_valid(h_valid),
-        .sof(h_valid && (h_bin == 9'd0)), .in_stype(2'd0),
+        .in_bin(h_bin), .in_meta(1'b0),
         .data_re(hd_re), .data_im(hd_im), .data_valid(hd_valid),
         .pilot_re(hp_re), .pilot_im(hp_im), .pilot_valid(hp_valid),
-        .sym_done(), .out_stype());
+        .out_sc(), .sym_done(), .out_meta());
 
     // Held for the whole frame: one training estimate serves every
     // later symbol, which is what N_TRAINING=1 means.
@@ -179,14 +178,16 @@ module rx_freq_domain #(
         .rx_re(eqd_sh_re[EQ_W-1:0]), .rx_im(eqd_sh_im[EQ_W-1:0]),
         .h_re(h_data_re[d_rd]), .h_im(h_data_im[d_rd]),
         .in_valid(gd_valid && eq_en),
-        .y_re(eqd_re), .y_im(eqd_im), .y_valid(eqd_valid));
+        .in_meta(1'b0),
+        .y_re(eqd_re), .y_im(eqd_im), .y_valid(eqd_valid), .y_meta());
 
     mmse_eq #(.W(EQ_W)) u_eq_pilot (
         .clk(clk), .rst(rst),
         .rx_re(eqp_sh_re[EQ_W-1:0]), .rx_im(eqp_sh_im[EQ_W-1:0]),
         .h_re(h_pil_re[p_rd]), .h_im(h_pil_im[p_rd]),
         .in_valid(gp_valid && op_pay),
-        .y_re(eqp_re), .y_im(eqp_im), .y_valid(eqp_valid));
+        .in_meta(1'b0),
+        .y_re(eqp_re), .y_im(eqp_im), .y_valid(eqp_valid), .y_meta());
 
     // ---- EQUALIZER-DOMAIN PHASE ----------------------------------
     // Third and last phase domain. out_sym is right for the grid, but

@@ -57,7 +57,11 @@ module ls_chanest #(
     output reg  signed [H_W-1:0]    h_re,
     output reg  signed [H_W-1:0]    h_im,
     output reg                      h_valid,
-    output reg                      h_last
+    output reg                      h_last,
+    // Natural-order bin of h_re/h_im. The sweep's own counter, carried
+    // through the same pipeline as the sample, so no consumer has to
+    // count h_valid pulses to find out which bin this is.
+    output reg  [7:0]               h_bin
 );
 
     localparam integer PIDX_W = (N_PILOT <= 1) ? 1 : $clog2(N_PILOT);
@@ -114,6 +118,7 @@ module ls_chanest #(
     reg [SLOT_W-1:0]  l1, r1;
     reg signed [16:0] w1;
     reg               v1, last1;
+    reg  [7:0]        bin1, bin2, bin2b, bin3;
     // p2: read the pilot memory
     reg signed [H_W-1:0] hl2_re, hl2_im, hr2_re, hr2_im;
     reg signed [16:0]    w2;
@@ -196,6 +201,7 @@ module ls_chanest #(
                 w1 <= {1'b0, rom[15:0]};
                 v1 <= 1'b1;
                 last1 <= (bin == N_FFT - 1);
+                bin1  <= bin[7:0];
                 if (bin == N_FFT - 1) begin
                     running <= 1'b0; have_pilots <= 1'b0; bin <= 0;
                 end else begin
@@ -206,24 +212,25 @@ module ls_chanest #(
             // p2
             hl2_re <= hp_re[l1]; hl2_im <= hp_im[l1];
             hr2_re <= hp_re[r1]; hr2_im <= hp_im[r1];
-            w2 <= w1; v2 <= v1; last2 <= last1;
+            w2 <= w1; v2 <= v1; last2 <= last1; bin2 <= bin1;
 
             // p2b
             d_re_r  <= d2_re;   d_im_r  <= d2_im;
             hl2b_re <= hl2_re;  hl2b_im <= hl2_im;
-            w2b <= w2; v2b <= v2; last2b <= last2;
+            w2b <= w2; v2b <= v2; last2b <= last2; bin2b <= bin2;
 
             // p3
             hl3_re <= hl2b_re; hl3_im <= hl2b_im;
             t3_re <= d_re_r * w2b;
             t3_im <= d_im_r * w2b;
-            v3 <= v2b; last3 <= last2b;
+            v3 <= v2b; last3 <= last2b; bin3 <= bin2b;
 
             // p4
             h_re    <= hl3_re + (t3_re >>> 15);
             h_im    <= hl3_im + (t3_im >>> 15);
             h_valid <= v3;
             h_last  <= last3;
+            h_bin   <= bin3;
         end
     end
     /* verilator lint_on WIDTHTRUNC */

@@ -18,15 +18,24 @@
 // derives grid_type.mem from the live ResourceGrid, so the RTL and the
 // golden model cannot disagree about which bin is what.
 //
-// sof marks the first bin of a symbol. The bin counter is reset from it
-// rather than free-running, so a dropped or extra sample resynchronises
-// at the next symbol instead of corrupting every symbol after it.
+// The bin index comes IN with each sample (in_bin) -- it is metadata the
+// time domain already knows -- so this block is stateless: type and
+// ordinal are two ROM lookups on in_bin. It used to count bins itself
+// and resynchronise on a `sof` pulse, i.e. it rebuilt position that its
+// producer already had (docs/rx_modular_architecture.md section 6).
+//
+// out_sc is the bin's ORDINAL among data bins (0..N_DATA-1) or among
+// pilot bins (0..N_PILOT-1), whichever stream it is emitted on, from the
+// generated grid_ord.mem. Downstream addresses H by it instead of
+// counting items.
 // ============================================================
 `timescale 1ns / 1ps
 `include "grid_params.vh"
 
 module grid_extract #(
-    parameter integer DATA_W = 32   // per component, matching cp_fft's output
+    parameter integer DATA_W = 32,  // per component, matching cp_fft's output
+    // Opaque sideband registered alongside the data; >= 1 bit.
+    parameter integer META_W = 1
 )(
     input  wire                     clk,
     input  wire                     rst,
@@ -34,8 +43,8 @@ module grid_extract #(
     input  wire signed [DATA_W-1:0] in_re,
     input  wire signed [DATA_W-1:0] in_im,
     input  wire                     in_valid,
-    input  wire                     sof,        // first bin of a symbol
-    input  wire [1:0]               in_stype,   // symbol tag, see cp_fft
+    input  wire [7:0]               in_bin,     // natural-order bin of this sample
+    input  wire [META_W-1:0]        in_meta,
 
     output reg  signed [DATA_W-1:0] data_re,
     output reg  signed [DATA_W-1:0] data_im,
@@ -45,31 +54,28 @@ module grid_extract #(
     output reg  signed [DATA_W-1:0] pilot_im,
     output reg                      pilot_valid,
 
-    output reg                      sym_done,   // pulses after the last bin
-
-    // Tag of the bin now on data_* / pilot_*. Registered alongside them,
-    // so it is valid whenever data_valid or pilot_valid is.
-    output reg  [1:0]               out_stype
+    output reg  [7:0]               out_sc,     // ordinal, see header
+    output reg  [META_W-1:0]        out_meta,   // in_meta of this item
+    output reg                      sym_done    // with the symbol's last bin
 );
-    localparam integer N_FFT  = `GRID_N_FFT;
-    localparam integer IDX_W  = $clog2(N_FFT);
-    // Sized, so the compare does not silently widen to 32 bits.
-    localparam [IDX_W-1:0] LAST_BIN = IDX_W'(N_FFT - 1);
+    localparam integer N_FFT = `GRID_N_FFT;
+    localparam [7:0]   LAST_BIN = 8'(N_FFT - 1);
 
     // 2-bit type per bin: 0 null, 1 data, 2 pilot.
     reg [1:0] sctype [0:N_FFT-1];
+    reg [7:0] scord  [0:N_FFT-1];
     initial $readmemh(`GRID_TYPE_MEM, sctype);
+    initial $readmemh(`GRID_ORD_MEM,  scord);
 
-    reg [IDX_W-1:0] bin;
-    wire [1:0] t = sctype[bin];
+    wire [1:0] t = sctype[in_bin];
 
     always @(posedge clk) begin
         if (rst) begin
-            bin         <= {IDX_W{1'b0}};
             data_valid  <= 1'b0;
             pilot_valid <= 1'b0;
             sym_done    <= 1'b0;
-            out_stype   <= 2'd0;
+            out_sc      <= 8'd0;
+            out_meta    <= {META_W{1'b0}};
             data_re <= 0; data_im <= 0;
             pilot_re <= 0; pilot_im <= 0;
         end else begin
@@ -78,14 +84,9 @@ module grid_extract #(
             sym_done    <= 1'b0;
 
             if (in_valid) begin
-                out_stype <= in_stype;
-                // sof overrides the counter: resynchronise per symbol.
-                if (sof)
-                    bin <= 1;
-                else
-                    bin <= (bin == LAST_BIN) ? {IDX_W{1'b0}} : bin + 1'b1;
-
-                case (sof ? sctype[0] : t)
+                out_sc   <= scord[in_bin];
+                out_meta <= in_meta;
+                case (t)
                     `GRID_TYPE_DATA: begin
                         data_re    <= in_re;
                         data_im    <= in_im;
@@ -98,9 +99,7 @@ module grid_extract #(
                     end
                     default: ;   // null / guard / DC -- dropped
                 endcase
-
-                if (!sof && bin == LAST_BIN)
-                    sym_done <= 1'b1;
+                sym_done <= (in_bin == LAST_BIN);
             end
         end
     end

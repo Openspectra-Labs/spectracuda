@@ -43,19 +43,27 @@
 `include "generated/demap_params.vh"
 
 module demapper #(
-    parameter integer W = 18            // Q12 input, from mmse_eq
+    parameter integer W      = 18,      // Q12 input, from mmse_eq
+    // Sideband that rides the SAME valid pipeline as the symbol, so the
+    // metadata leaving with `bits` is the metadata that entered with
+    // y_re/y_im (docs/rx_modular_architecture.md, rule: metadata is part
+    // of the data). Opaque here. Width >= 1; tie to 0 if unused.
+    parameter integer META_W = 1
 )(
     input  wire                clk,
     input  wire                rst,
 
     input  wire signed [W-1:0] y_re,
     input  wire signed [W-1:0] y_im,
-    input  wire         [1:0]  mod_scheme,   // DM_QPSK / DM_QAM16 / DM_QAM64
+    // Per item: DM_QPSK / DM_QAM16 / DM_QAM64, or DM_BPSK (header).
+    input  wire         [1:0]  mod_scheme,
     input  wire                in_valid,
+    input  wire  [META_W-1:0]  in_meta,
 
     output reg          [5:0]  bits,         // MSB-first, I bits then Q
-    output reg          [3:0]  n_bits,       // 2, 4 or 6
-    output reg                 out_valid
+    output reg          [3:0]  n_bits,       // 1 (BPSK), 2, 4 or 6
+    output reg                 out_valid,
+    output reg   [META_W-1:0]  out_meta
 );
 
     // ---- per-scheme constants, muxed ----
@@ -90,6 +98,15 @@ module demapper #(
     reg        [3:0]  d2_half;
     reg               d2_v;
 
+    // ---- BPSK (header) and metadata ride the same three stages ----
+    // BPSK's decision is bit = ~sign(re): exactly the decision rx_top used
+    // to make inline for the header. The QAM scale/bias path still runs
+    // (with QPSK constants) for a BPSK item; its result is not used.
+    wire              is_bpsk = (mod_scheme == 2'(`DM_BPSK));
+    reg               d1_bpsk, d2_bpsk;
+    reg               d1_bbit, d2_bbit;
+    reg  [META_W-1:0] d1_meta, d2_meta;
+
     wire signed [63:0] sh_re = d1_re >>> `DM_SHIFT;
     wire signed [63:0] sh_im = d1_im >>> `DM_SHIFT;
     // clip to [0, maxlvl].
@@ -118,22 +135,34 @@ module demapper #(
             d1_half <= half;
             d1_max  <= maxlvl;
             d1_v    <= in_valid;
+            d1_bpsk <= is_bpsk;
+            d1_bbit <= ~y_re[W-1];
+            d1_meta <= in_meta;
 
             // d2: binary level -> Gray
             d2_i    <= lvl_i ^ (lvl_i >> 1);
             d2_q    <= lvl_q ^ (lvl_q >> 1);
             d2_half <= d1_half;
             d2_v    <= d1_v;
+            d2_bpsk <= d1_bpsk;
+            d2_bbit <= d1_bbit;
+            d2_meta <= d1_meta;
 
             // d3: pack MSB-first, I bits then Q, matching
             // mapper.py's concatenate([i_bits, q_bits]).
-            case (d2_half)
-                4'd2: bits <= {d2_i[1:0], d2_q[1:0], 2'b00};
-                4'd3: bits <= {d2_i[2:0], d2_q[2:0]};
-                default: bits <= {d2_i[0], d2_q[0], 4'b0000};
-            endcase
-            n_bits    <= d2_half << 1;
+            if (d2_bpsk) begin
+                bits   <= {d2_bbit, 5'b00000};
+                n_bits <= 4'd1;
+            end else begin
+                case (d2_half)
+                    4'd2: bits <= {d2_i[1:0], d2_q[1:0], 2'b00};
+                    4'd3: bits <= {d2_i[2:0], d2_q[2:0]};
+                    default: bits <= {d2_i[0], d2_q[0], 4'b0000};
+                endcase
+                n_bits <= d2_half << 1;
+            end
             out_valid <= d2_v;
+            out_meta  <= d2_meta;
         end
     end
     /* verilator lint_on WIDTHTRUNC */

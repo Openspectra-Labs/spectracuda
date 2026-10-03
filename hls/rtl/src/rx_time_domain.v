@@ -46,7 +46,8 @@ module rx_time_domain #(
     output wire signed [FFT_W-1:0]    fft_im,
     output wire                       fft_valid,
     output wire                       fft_sof,
-    output wire [1:0]                 fft_stype
+    output wire [1:0]                 fft_stype,
+    output wire [7:0]                 fft_bin
 );
     `include "rx_stype.vh"
     localparam integer FFT_SIZE   = `FFT_SIZE;
@@ -213,6 +214,7 @@ module rx_time_domain #(
         .in_stype(slot_stype),
         .out_re(fft_re), .out_im(fft_im), .out_valid(fft_valid),
         .out_last(), .out_sof(fft_sof), .out_stype(fft_stype),
+        .out_bin(fft_bin),
         .overflow());
 
     assign frame_start = fsq_start;
