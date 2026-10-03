@@ -1,0 +1,25 @@
+{
+  "config": {
+    "fft_size": 256,
+    "n_pilot": 8,
+    "n_data": 216,
+    "cp_len": 32,
+    "modem": "qpsk",
+    "fec": "conv_v27",
+    "crc": "crc32",
+    "sync": "schmidl_cox",
+    "cfo": "schmidl_cox",
+    "channel_estimator": "ls",
+    "equalizer": "mmse"
+  },
+  "seed": 7,
+  "fft_size": 256,
+  "cp_len": 32,
+  "slot_len": 288,
+  "sym_start": 544,
+  "n_in": 288,
+  "n_out": 256,
+  "in_peak": 0.1588054597377777,
+  "out_peak": 1.0000001192092896,
+  "python_convention": "unscaled forward (numpy)"
+}

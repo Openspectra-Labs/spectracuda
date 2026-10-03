@@ -1,0 +1,6 @@
+{
+  "scheme": "qpsk",
+  "bits_per_symbol": 2,
+  "n_sym": 4096,
+  "sym_peak": 2.079279661178589
+}

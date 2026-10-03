@@ -1,0 +1,27 @@
+{
+  "config": {
+    "fft_size": 256,
+    "n_pilot": 8,
+    "n_data": 216,
+    "cp_len": 32,
+    "modem": "qpsk",
+    "fec": "conv_v27",
+    "crc": "crc32",
+    "sync": "schmidl_cox",
+    "cfo": "schmidl_cox",
+    "channel_estimator": "ls",
+    "equalizer": "mmse"
+  },
+  "snr_db": 20.0,
+  "seed": 7,
+  "n_samples": 4112,
+  "fft_size": 256,
+  "L": 128,
+  "start_index": 200,
+  "p_re": 0.24321921169757843,
+  "p_im": 0.0420406199991703,
+  "expected_angle_rad": 0.17115951046938455,
+  "expected_angle_turns": 0.027240882148391564,
+  "expected_cfo": 0.054481760556567865,
+  "channel_cfo_applied": 0.05
+}

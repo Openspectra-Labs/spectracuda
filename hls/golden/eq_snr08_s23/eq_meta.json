@@ -1,0 +1,22 @@
+{
+  "config": {
+    "fft_size": 256,
+    "n_pilot": 8,
+    "n_data": 216,
+    "cp_len": 32,
+    "modem": "qpsk",
+    "fec": "conv_v27",
+    "crc": "crc32",
+    "sync": "schmidl_cox",
+    "cfo": "schmidl_cox",
+    "channel_estimator": "ls",
+    "equalizer": "mmse"
+  },
+  "snr_db": 8.0,
+  "seed": 23,
+  "n_data": 216,
+  "noise_var": 0.001,
+  "h_min": 0.11020533740520477,
+  "h_max": 2.0667507648468018,
+  "y_peak": 5.771116733551025
+}

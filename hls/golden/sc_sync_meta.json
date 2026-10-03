@@ -1,0 +1,28 @@
+{
+  "config": {
+    "fft_size": 256,
+    "n_pilot": 8,
+    "n_data": 216,
+    "cp_len": 32,
+    "modem": "qpsk",
+    "fec": "conv_v27",
+    "crc": "crc32",
+    "sync": "schmidl_cox",
+    "cfo": "schmidl_cox",
+    "channel_estimator": "ls",
+    "equalizer": "mmse"
+  },
+  "payload_bits": 2000,
+  "guard": 200,
+  "snr_db": 20.0,
+  "cfo_frac": 0.05,
+  "seed": 7,
+  "n_samples": 4112,
+  "L": 128,
+  "expected_start_index": 200,
+  "expected_metric": 0.9717519738554947,
+  "expected_true_start": 200,
+  "frame_found": true,
+  "crc_valid": true,
+  "cfo_estimate": 0.054481760556567865
+}
