@@ -598,8 +598,9 @@ bit-exact. No algorithm, width or rounding changes until step 6 is done.
 
 1. ✅ Mapping (this document §1–6).
 2. ✅ Interfaces frozen (§7), `rx_if.vh` added. ✅ H11 + H12 fixed.
-   Remaining: frozen-RTL dumps at I1/I2 from the fixed RTL, at C=1 and
-   C=10.
+   ✅ Reference dumps at I1/I2/C1/O1 in `hls/rtl/golden_if/` (7 frames,
+   each bit-exact vs Python and byte-identical at C=1 and C=10; formats in
+   its README). Captured by `capture_golden.sh` + `tb/capture_taps.vh`.
 3. **FD**: I1 in, I2 out; B1 + classify (all BODY → DATA); metadata
    through `grid_extract`/`ls_chanest`/`mmse_eq`/`pilot_cpe`; demapper moves
    in with BPSK; B2. `tb_rx_freq_domain`.

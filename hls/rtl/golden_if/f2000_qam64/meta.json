@@ -1,0 +1,17 @@
+{
+ "bits": 2000,
+ "modem": "qam64",
+ "cfo": 0.0,
+ "evm": 0.0,
+ "snr": null,
+ "seed": 0,
+ "cps": 1.0,
+ "nsamp": 2384,
+ "cfg_encoded_bits": 4012,
+ "cfg_di_units": 250,
+ "cfg_di_rows": 16,
+ "cfg_di_cols": 16,
+ "python_ref": "ad0a396",
+ "rtl_matches_python": true,
+ "measured_evm": 0.0009990561520680785
+}

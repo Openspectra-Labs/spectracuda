@@ -47,6 +47,11 @@ module rx_top_tb;
             $fwrite(fi1, "%0d %0d\n", $signed(dut.fft_re), $signed(dut.fft_im));
 `endif
 
+`ifdef RXT_CAPTURE_DIR
+`include "ofdm_params.vh"
+`include "tb/capture_taps.vh"
+`endif
+
     reg [31:0] stim [0:NSAMP-1];
     integer fd, fu, i, nunits;
     reg hdr_seen = 0;
@@ -91,6 +96,9 @@ module rx_top_tb;
         @(negedge clk);
         in_valid = 1'b0;
         repeat (`RXT_DRAIN) @(posedge clk);
+`ifdef RXT_CAPTURE_DIR
+        cap_write_c1;
+`endif
         $fclose(fd); $fclose(fu);
         $fwrite(fu, "OVF %0d\n", fifo_ovf);
         $display("rx_top_tb: %0d samples, hdr_seen=%0d units=%0d ovf=%0d", NSAMP, hdr_seen, nunits, fifo_ovf);

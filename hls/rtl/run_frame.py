@@ -77,6 +77,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bits", type=int, default=64)
     ap.add_argument("--cfo", type=float, default=0.0)
+    ap.add_argument("--capture", default=None,
+                    help="write reference dumps (i1/i2/c1/o1 + stimulus + meta) "
+                         "to this directory -- see tb/capture_taps.vh")
     ap.add_argument("--dump-i1", default=None,
                     help="write the FFT output (I1) bins to this file")
     ap.add_argument("--cps", type=float, default=1.0,
@@ -207,6 +210,9 @@ def main() -> None:
         from fractions import Fraction
         cps = Fraction(a.cps).limit_denominator(16)
         f.write(f"`define RXT_CPS_NUM {cps.numerator}\n`define RXT_CPS_DEN {cps.denominator}\n")
+        if a.capture:
+            os.makedirs(a.capture, exist_ok=True)
+            f.write(f'`define RXT_CAPTURE_DIR "{os.path.abspath(a.capture)}"\n')
         if a.dump_i1:
             f.write(f'`define RXT_I1_PATH "{os.path.abspath(a.dump_i1)}"\n')
         f.write("`define RXT_DRAIN 200000\n")
@@ -279,11 +285,22 @@ def main() -> None:
     py_ok = bool(np.array_equal(np.asarray(res["bits"]).ravel()[:a.bits], bits.ravel()))
     print(f"\nrtl==python : {'YES' if ok_u else 'NO'}   python==tx : {'YES' if py_ok else 'NO'}")
     print(f"VERDICT: {'PASS -- bit-exact' if (ok_h and ok_u) else 'DIVERGED'}")
-    # Keep the run directory only when something needs looking at.
-    if ok_h and ok_u:
-        shutil.rmtree(run_dir, ignore_errors=True)
-    else:
-        print(f"run files kept in {run_dir}")
+    if a.capture:
+        # Self-contained: everything a stage testbench needs to replay
+        # this frame without Python. o1 = the RTL's deinterleaved bytes.
+        shutil.copy(stim, os.path.join(a.capture, "stim.hex"))
+        with open(os.path.join(a.capture, "o1.txt"), "w") as f:
+            f.write("".join(f"{v}\n" for v in rtl_units))
+        meta = dict(bits=a.bits, modem=a.modem, cfo=a.cfo, evm=a.evm, snr=a.snr,
+                    seed=a.seed, cps=a.cps, nsamp=int(rx.shape[-1]),
+                    cfg_encoded_bits=int(enc), cfg_di_units=int(n_units),
+                    cfg_di_rows=int(M), cfg_di_cols=int(N),
+                    python_ref=golden_ref.REF_COMMIT,
+                    rtl_matches_python=bool(ok_h and ok_u),
+                    measured_evm=meas_evm)
+        with open(os.path.join(a.capture, "meta.json"), "w") as f:
+            json.dump(meta, f, indent=1)
+
     # Keep the run directory only when something needs looking at.
     if ok_h and ok_u:
         shutil.rmtree(run_dir, ignore_errors=True)

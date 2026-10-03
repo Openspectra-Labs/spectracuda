@@ -1,0 +1,9 @@
+fseq 0
+cfg_body_syms 76
+cfg_mod 1
+cfg_payload_len_bits 16384
+cfg_crc 1
+cfg_fec0 0
+cfg_fec1 1
+cfg_c2_syms 0
+cfg_dmrs_period 0
