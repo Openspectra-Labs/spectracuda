@@ -9,9 +9,10 @@
 //   +exp=FILE    expected FD->BIT items, one per line:
 //                fseq sym sc stype n l0 l1 l2 l3 l4 l5 ss se fs fe
 //   +cfg=FILE    config events, one per line:
-//                trig_fseq delay valid err fseq mod body c2 dmrs
+//                trig_frame delay valid err fseq mod body c2 dmrs
 //                Event i drives the C1 bundle `delay` clocks after the
-//                LAST header item of frame `trig_fseq` was accepted on the
+//                LAST header item of the trig_frame-th frame (0-based, in
+//                arrival order -- fseq values repeat) was accepted on the
 //                output (i.e. after the bit domain could have parsed it),
 //                and holds it until event i+1. Events fire in file order.
 //   +cps_num=N +cps_den=D  clocks per input sample = N/D (bins arrive one
@@ -55,8 +56,8 @@ module rx_freq_domain_tb;
     wire [7:0]  out_sc, out_sym;
     wire [1:0]  out_fseq;
     wire        out_ss, out_se, out_fs, out_fe;
-    wire        b1_ovf, b2_ovf, seq_err, cfg_uns;
-    wire [10:0] b1_level, b1_hwm;
+    wire        b1_ovf, b2_ovf, seq_err, cfg_uns, fseq_col, hdr_no_tr, hq_held;
+    wire [11:0] b1_level, b1_hwm;
     wire [9:0]  b2_hwm;
 
     rx_freq_domain #(.LLR_W(LLR_W)) dut (
@@ -74,6 +75,7 @@ module rx_freq_domain_tb;
         .out_frame_start(out_fs), .out_frame_end(out_fe),
         .st_b1_overflow(b1_ovf), .st_b2_overflow(b2_ovf),
         .st_seq_err(seq_err), .st_cfg_unsupported(cfg_uns),
+        .st_fseq_collision(fseq_col), .st_hdr_no_train(hdr_no_tr), .st_hq_held(hq_held),
         .st_b1_level(b1_level), .st_b1_hwm(b1_hwm), .st_b2_hwm(b2_hwm));
 
     // ---------------- files ----------------
@@ -96,6 +98,9 @@ module rx_freq_domain_tb;
     integer nc = 0;
 
     integer cps_num = 1, cps_den = 1, stall = 0, gap = 64;
+    // Negative tests: +expect=1 (fseq collision) or +expect=2 (header
+    // waiting for an H with no training) -- PASS means that flag fired.
+    integer expect_flag = 0;
     reg [1023:0] fname;
 
     task load;
@@ -138,6 +143,7 @@ module rx_freq_domain_tb;
             void'($value$plusargs("cps_den=%d", cps_den));
             void'($value$plusargs("stall=%d", stall));
             void'($value$plusargs("gap=%d", gap));
+            void'($value$plusargs("expect=%d", expect_flag));
             $display("TB: %0d input items, %0d expected outputs, %0d cfg events, C=%0d/%0d, stall=%0d%%",
                      ns, ne, nc, cps_num, cps_den, stall);
         end
@@ -196,13 +202,12 @@ module rx_freq_domain_tb;
     endtask
 
     // ---------------- C1 driver ----------------
-    integer hdr_end_cyc [0:3];
+    integer hdr_end_cyc [0:63];          // by frame ordinal
+    integer n_hdr_end = 0;
     integer ci = 0, ev_cyc = -1, cfg_out_cyc = -1, first_hdr_out_cyc = -1;
-    integer k0;
-    initial for (k0 = 0; k0 < 4; k0 = k0 + 1) hdr_end_cyc[k0] = -1;
 
     always @(posedge clk) if (!rst && ci < nc) begin
-        if (hdr_end_cyc[c_tf[ci]] >= 0 && cyc >= hdr_end_cyc[c_tf[ci]] + c_dl[ci]) begin
+        if (n_hdr_end > c_tf[ci] && cyc >= hdr_end_cyc[c_tf[ci]] + c_dl[ci]) begin
             cfg_valid <= c_v[ci][0]; cfg_err <= c_e[ci][0]; cfg_fseq <= c_fq[ci];
             cfg_mod <= c_md[ci]; cfg_body <= c_bd[ci]; cfg_c2 <= c_c2[ci];
             cfg_dmrs <= c_dp[ci];
@@ -239,7 +244,10 @@ module rx_freq_domain_tb;
 
         if (out_valid && out_ready) begin
             if (out_stype == 3'd1 && first_hdr_out_cyc < 0) first_hdr_out_cyc = cyc;
-            if (out_stype == 3'd1 && out_se) hdr_end_cyc[out_fseq] = cyc;
+            if (out_stype == 3'd1 && out_se) begin
+                hdr_end_cyc[n_hdr_end] = cyc;
+                n_hdr_end = n_hdr_end + 1;
+            end
             if (ei >= ne) begin
                 extra = extra + 1;
                 if (extra <= 5) $display("TB: EXTRA output fseq=%0d sym=%0d sc=%0d st=%0d", out_fseq, out_sym, out_sc, out_stype);
@@ -268,18 +276,29 @@ module rx_freq_domain_tb;
         drive_inputs;
         // drain: wait for everything expected, then a quiet period
         t_end = cyc;
+        if (expect_flag != 0) begin
+            repeat (50000) @(posedge clk);
+            $display("TB: negative test, expect=%0d: fseq_collision=%0d hdr_no_train=%0d",
+                     expect_flag, fseq_col, hdr_no_tr);
+            if ((expect_flag == 1 && fseq_col) || (expect_flag == 2 && hdr_no_tr))
+                $display("TB_RESULT PASS");
+            else
+                $display("TB_RESULT FAIL");
+            $finish;
+        end
         while (ei < ne && cyc < t_end + 2000000) @(posedge clk);
         repeat (20000) @(posedge clk);
         $display("TB: outputs %0d/%0d, mismatches %0d, extra %0d, stability %0d",
                  ei, ne, errors, extra, stab_err);
-        $display("TB: flags b1_ovf=%0d b2_ovf=%0d seq_err=%0d cfg_unsupported=%0d b1_level_end=%0d",
-                 b1_ovf, b2_ovf, seq_err, cfg_uns, b1_level);
-        $display("TB: B1 high-water %0d of %0d, B2 high-water %0d of 512",
-                 b1_hwm, 1024, b2_hwm);
+        $display("TB: flags b1_ovf=%0d b2_ovf=%0d seq_err=%0d cfg_unsupported=%0d fseq_collision=%0d hdr_no_train=%0d b1_level_end=%0d",
+                 b1_ovf, b2_ovf, seq_err, cfg_uns, fseq_col, hdr_no_tr, b1_level);
+        $display("TB: B1 high-water %0d of %0d, B2 high-water %0d of 512, hq_held=%0d",
+                 b1_hwm, 5*256, b2_hwm, hq_held);
         $display("TB: first header bin in -> first header group out: %0d clk; cfg applied at %0d",
                  first_hdr_out_cyc - in_first_hdr_cyc, cfg_out_cyc);
         if (ei == ne && errors == 0 && extra == 0 && stab_err == 0 &&
-            !b1_ovf && !b2_ovf && !seq_err && !cfg_uns && b1_level == 0)
+            !b1_ovf && !b2_ovf && !seq_err && !cfg_uns && !fseq_col && !hdr_no_tr &&
+            b1_level == 0)
             $display("TB_RESULT PASS");
         else
             $display("TB_RESULT FAIL");

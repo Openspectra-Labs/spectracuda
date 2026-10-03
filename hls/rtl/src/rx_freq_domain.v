@@ -20,8 +20,10 @@
 //            DATA:   eq -> pilot_cpe (+ metadata FIFO) --+
 //            HEADER: eq -> header queue ----------------+-> demapper -> [B2] -> out_*
 //
-// B1 (BODY_BUF_SYMS symbols): TD cannot be stalled, but BODY symbols
-//    cannot be processed until this frame's config is known. B1 is one
+// B1 (BODY_BUF_SYMS symbols): the FD ingress SCHEDULER. TD cannot be
+//    stalled, so every item whose processing prerequisites are not yet
+//    satisfied waits here -- mainly BODY waiting for its frame's config,
+//    but also HEADER waiting for its frame's channel estimate. B1 is one
 //    in-order FIFO; its head is released by these rules:
 //      TRAIN  -> always.
 //      HEADER -> once H for the SAME frame is complete. The header is
@@ -66,7 +68,7 @@ module rx_freq_domain #(
     parameter integer SHIFT_FFT_TO_CE = 3,
     parameter integer SHIFT_FFT_TO_EQ = 3,
     parameter integer LLR_W           = 1,     // 1 = hard decision (bit-exact today)
-    parameter integer BODY_BUF_SYMS   = 4,     // B1 = BODY_BUF_SYMS x FFT_SIZE bins
+    parameter integer BODY_BUF_SYMS   = 5,     // B1 = BODY_BUF_SYMS x FFT_SIZE bins
     parameter integer B2_DEPTH        = 512    // step-3 test depth
 )(
     input  wire                     clk,
@@ -110,6 +112,9 @@ module rx_freq_domain #(
     output wire                     st_b2_overflow,
     output reg                      st_seq_err,       // metadata FIFO / merge / CPE pairing
     output reg                      st_cfg_unsupported,
+    output reg                      st_fseq_collision, // frame entered on an unretired fseq
+    output reg                      st_hdr_no_train,   // HEADER waiting for H nobody is making
+    output reg                      st_hq_held,        // a header actually waited for older CPE data
     output wire [$clog2(BODY_BUF_SYMS*`FFT_SIZE):0] st_b1_level,
     output reg  [$clog2(BODY_BUF_SYMS*`FFT_SIZE):0] st_b1_hwm,
     output reg  [$clog2(B2_DEPTH):0]                st_b2_hwm
@@ -501,6 +506,73 @@ module rx_freq_domain #(
     always @(posedge clk) begin
         if (rst) st_b2_hwm <= 0;
         else if (b2_level > st_b2_hwm) st_b2_hwm <= b2_level;
+    end
+
+    // =================================================================
+    // Frame residency: fseq wrap safety, deadlock and header-queue checks
+    // =================================================================
+    // A frame RETIRES when nothing of it is left anywhere in FD: none of
+    // its bins are in B1, and its last output item has been ACCEPTED --
+    // frame_end, or for a cfg_err frame the last header group (its body
+    // is dropped in B1). Everything between B1 and the output is in
+    // order, so the last item leaving means every item has left.
+    //
+    // A frame entering on an fseq whose previous frame has not retired is
+    // the wrap rule broken (doc section 7): st_fseq_collision. This is
+    // also exactly when the per-fseq config entry is cleared, so the
+    // check proves the clear is safe.
+    localparam integer B1_AWL = $clog2(BODY_BUF_SYMS * `FFT_SIZE) + 1;
+    reg [B1_AWL-1:0] b1_cnt [0:3];
+    reg              fe_acc [0:3];      // frame_end accepted
+    reg              he_acc [0:3];      // last header group accepted
+    wire acc       = out_valid && out_ready;
+    wire acc_fe    = acc && out_frame_end;
+    wire acc_he    = acc && (out_stype == ST_HEADER) && out_sym_end &&
+                     (out_sym_idx == 8'(BODY0 - 1));
+    wire in_fs_ev  = in_valid && in_frame_start;
+    wire retired_in = (b1_cnt[in_fseq] == 0) &&
+                      (fe_acc[in_fseq] || (t_bad[in_fseq] && he_acc[in_fseq]));
+
+    // HEADER may only wait for H if its own TRAIN has already been
+    // released into the estimator -- otherwise nothing will ever make
+    // that H and B1 deadlocks. Tracked at B1 release, not at the
+    // estimator, so there is no pipeline-delay window.
+    reg       tr_seen;
+    reg [1:0] tr_fseq;
+
+    integer q;
+    always @(posedge clk) begin
+        if (rst) begin
+            for (q = 0; q < 4; q = q + 1) begin
+                b1_cnt[q] <= 0; fe_acc[q] <= 1'b1; he_acc[q] <= 1'b1;
+            end
+            st_fseq_collision <= 1'b0;
+            st_hdr_no_train   <= 1'b0;
+            st_hq_held        <= 1'b0;
+            tr_seen <= 1'b0; tr_fseq <= 2'd0;
+        end else begin
+            for (q = 0; q < 4; q = q + 1) begin
+                if (in_valid && in_fseq == q[1:0] && !(b1_pop && h1_fq == q[1:0]))
+                    b1_cnt[q] <= b1_cnt[q] + 1'b1;
+                else if (!(in_valid && in_fseq == q[1:0]) && b1_pop && h1_fq == q[1:0])
+                    b1_cnt[q] <= b1_cnt[q] - 1'b1;
+            end
+            if (in_fs_ev) begin
+                if (!retired_in) st_fseq_collision <= 1'b1;
+                fe_acc[in_fseq] <= 1'b0;
+                he_acc[in_fseq] <= 1'b0;
+            end
+            if (acc_fe) fe_acc[out_fseq] <= 1'b1;
+            if (acc_he) he_acc[out_fseq] <= 1'b1;
+
+            if (b1_pop && is_train) begin tr_seen <= 1'b1; tr_fseq <= h1_fq; end
+            if (b1_hv && is_hdr && !hdr_go && !(tr_seen && tr_fseq == h1_fq))
+                st_hdr_no_train <= 1'b1;
+
+            // a header entering the queue while older data is inside CPE
+            if (eqd_valid && ed_st == ST_HEADER && cm_level != 0)
+                st_hq_held <= 1'b1;
+        end
     end
 
     // =================================================================

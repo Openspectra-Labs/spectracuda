@@ -17,6 +17,11 @@ Scenarios (docs/rx_modular_architecture.md section 10):
   err        cfg_err for the frame: BODY dropped, B1 must drain to empty
   twoframes  two frames back to back, the first one's config late, so the
              second frame queues behind the first in B1 (no inheritance)
+  wrap5      five frames, fseq 0,1,2,3,0: a LEGAL wrap -- no collision flag
+  collision  NEGATIVE: two consecutive frames both fseq 0, the first still
+             resident -- st_fseq_collision must fire
+  notrain    NEGATIVE: a frame without its training symbol -- the header can
+             never get its H; st_hdr_no_train must fire
 """
 from __future__ import annotations
 
@@ -81,13 +86,13 @@ def build(bdir):
     return os.path.join(bdir, "fd_tb")
 
 
-def run(binary, wdir, name, stim, exp, cfg, cps, stall, gap=64):
+def run(binary, wdir, name, stim, exp, cfg, cps, stall, gap=64, expect=0):
     sp, ep, cp = (os.path.join(wdir, f"{name}.{x}") for x in ("stim", "exp", "cfg"))
     write(sp, stim); write(ep, exp); write(cp, cfg)
     num, den = (5, 2) if cps == 2.5 else (int(cps), 1)
     r = subprocess.run([binary, f"+stim={sp}", f"+exp={ep}", f"+cfg={cp}",
                         f"+cps_num={num}", f"+cps_den={den}", f"+stall={stall}",
-                        f"+gap={gap}"], capture_output=True, text=True)
+                        f"+gap={gap}", f"+expect={expect}"], capture_output=True, text=True)
     out = r.stdout + r.stderr
     ok = "TB_RESULT PASS" in out
     info = [l[4:] for l in out.splitlines() if l.startswith("TB: ") and
@@ -121,11 +126,36 @@ def main():
         for pair in (("f64_qpsk", "f2000_qam64"), ("f2000_qam64_cfo0p3", "f512_qam16")):
             for c in (1, 10):
                 tests.append((pair, c, "twoframes"))
+        for c in (1, 10):
+            tests.append(("f64_qpsk", c, "wrap5"))
+            tests.append(("f64_qpsk", c, "collision"))
+            tests.append(("f64_qpsk", c, "notrain"))
 
     fails = 0
+    worst_b1 = worst_b2 = 0
+    hq_seen = 0
     for case, c, mode in tests:
-        stall = {1: 20, 2.5: 30, 10: 50}[c] if mode in ("stall", "twoframes") else 0
-        if mode == "twoframes":
+        stall = {1: 20, 2.5: 30, 10: 50}[c] if mode in ("stall", "twoframes", "wrap5") else 0
+        expect = {"collision": 1, "notrain": 2}.get(mode, 0)
+        if mode == "wrap5":
+            stim, exp, cfg = [], [], []
+            for i, fq in enumerate((0, 1, 2, 3, 0)):
+                s_, e_, c_ = frame(case, fq)
+                stim += s_; exp += e_
+                cfg.append(cfg_line(i, 150, 1, 0, fq, c_))
+            name = f"{case}x5"
+        elif mode == "collision":
+            s0, e0, c0 = frame(case, 0)
+            s1, e1, c1_ = frame("f2000_qam64", 0)
+            stim, exp = s0 + s1, e0 + e1
+            cfg = [cfg_line(0, int(2.5 * 288 * c), 1, 0, 0, c0)]
+            name = f"{case}+f2000_qam64 same-fseq"
+        elif mode == "notrain":
+            stim, exp, c1 = frame(case, 0)
+            stim = [r for r in stim if r[1] != 0]          # drop the training symbol
+            cfg = [cfg_line(0, 150, 1, 0, 0, c1)]
+            name = f"{case} no-training"
+        elif mode == "twoframes":
             s0, e0, c0 = frame(case[0], 0)
             s1, e1, c1 = frame(case[1], 1)
             late = int(2.5 * 288 * c)
@@ -147,14 +177,27 @@ def main():
                 cfg = [cfg_line(0, 150, 0, 1, 0, c1)]
                 exp = [r for r in exp if r[3] == 1]           # header only
         tag = f"{name} C={c} {mode}" + (f" stall={stall}%" if stall else "")
-        ok, info, out = run(binary, wdir, f"t{len(tag)}_{abs(hash(tag))}", stim, exp, cfg, c, stall)
+        ok, info, out = run(binary, wdir, f"t{len(tag)}_{abs(hash(tag))}", stim, exp, cfg,
+                            c, stall, expect=expect)
         hw = next((i for i in info if "high-water" in i), "")
+        if expect:
+            hw = next((l[4:] for l in out.splitlines() if "negative test" in l), "")
+        else:
+            import re
+            m = re.search(r"B1 high-water (\d+).*B2 high-water (\d+).*hq_held=(\d)", hw)
+            if m:
+                worst_b1 = max(worst_b1, int(m.group(1)))
+                worst_b2 = max(worst_b2, int(m.group(2)))
+                hq_seen += int(m.group(3))
         print(f"{'PASS' if ok else 'FAIL'}  {tag:60s} {hw}")
         if not ok:
             fails += 1
             for i in info:
                 print(f"        {i}")
     print(f"\n{len(tests) - fails}/{len(tests)} passed")
+    print(f"max B1 occupancy over all positive tests: {worst_b1} of 1280 "
+          f"({100.0 * worst_b1 / 1280:.0f}%); max B2: {worst_b2} of 512; "
+          f"header queue actually held a header in {hq_seen} test(s)")
     if not a.keep and fails == 0:
         shutil.rmtree(wdir, ignore_errors=True)
     sys.exit(1 if fails else 0)

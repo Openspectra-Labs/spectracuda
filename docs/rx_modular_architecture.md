@@ -455,50 +455,102 @@ Config lives in **one place**: a register bundle owned by BD's config
 publisher. TD and FD hold no copies beyond latching the bundle whose
 `cfg_fseq` matches the frame they are processing.
 
-### B1, FD ingress buffer (waiting for config)
+### B1, the FD ingress scheduler
 
-I1 has no backpressure, so FD can't stall the FFT while the header is
-decoded. BODY symbols are written into B1 as they arrive. They are read
-out (at up to 1 bin/clk) only once `cfg_valid && cfg_fseq == fb_fseq`.
-TRAIN and HEADER symbols bypass B1 (they need no config). If config is
-already valid, B1 is a pass-through FIFO.
+I1 has no backpressure, so FD can never stall the FFT. B1 is therefore
+FD's **ingress scheduling/buffering mechanism for every item whose
+processing prerequisites are not yet satisfied**. It is one in-order FIFO
+whose head is released by rule (`rx_freq_domain.v`):
 
-**Worst-case latency, last header bin out of FFT → `cfg_valid`:**
+| Item | Prerequisite | If not met |
+|---|---|---|
+| TRAIN | none | — |
+| HEADER | **H for its own frame is complete** | waits |
+| BODY | its frame's config is valid (C1, matching `fseq`) **and** its header has left FD | waits; dropped on `cfg_err` or past `cfg_body_syms` |
+
+BODY waiting for config is the main case and what B1 was first sized for.
+HEADER waiting for H was found while building it (next subsection).
+
+**Explicit dependency found in step 3b: HEADER needs H.** The header symbol
+is equalized with the channel estimate from that frame's training symbol.
+The old RTL never checked that H was ready. It worked because the
+estimator's sweep (1 bin/clock) happened to finish ahead of the header's
+bins, which arrive a CP gap after the training symbol. Any burst out of a
+buffer (back-to-back frames, a held frame draining) breaks that race and
+equalizes the header against the PREVIOUS frame's H. In the new FD it is a
+handshake: HEADER leaves B1 only when `h_done && h_fseq == its fseq`, and
+`h_done` clears whenever a new training symbol enters the estimator.
+`st_hdr_no_train` flags the deadlock case (a header waiting for an H that
+no released TRAIN will produce).
+
+**Sizing.** Two waits stack:
+
+- **T_Hwait**, the header's wait for H: the estimator needs T_H ≈ 270
+  clocks after the training symbol's last bin (sweep of 256 + pipeline);
+  the header's first bin arrives 32·C + 1 later, so
+  `T_Hwait = max(0, T_H − 32·C)`. ≈ 238 clocks at C=1, 0 for C ≥ 9.
+- **L_cfg**, last header bin out of FD → `cfg_valid` (table below).
+
+```
+B1_syms = ceil((T_Hwait + L_cfg − 32·C) / (288·C)) + 1
+```
+
+The first version of this formula omitted T_Hwait. A C=1 back-to-back
+test then filled B1 to exactly 1024/1024 (4 symbols, no margin).
 
 | Term | Current header (refactor) | New header (CRC-16 + conv 1/2, 2 symbols) |
 |---|---|---|
 | FD pipeline to the header's last LLR (grid + eq + demap) | ≤ 12 clk | ≤ 12 clk |
-| header collect (new format spreads 268 coded bits over 2 symbols, so decoding starts after the last one) | — | 0 (in parallel with arrival) |
-| header decode | `header_decode`: ≈ 5 clk after its last bit | dedicated header Viterbi, 134 pairs: 3 groups × 171 + final flush ≈ 110 → **≈ 625 clk** (from `viterbi_dec`'s FSM) |
-| descramble + CRC-16 + parse (serial, inline) | — | ≈ 5 clk |
-| `cfg_body_syms` derivation (accumulator, ≤ 128 iterations; the DMRS term is a shift) | ≤ 130 clk | ≤ 130 clk |
+| header collect (new format spreads 268 coded bits over 2 symbols) | — | 0 (in parallel with arrival) |
+| header decode | `header_decode`: ≈ 5 clk after its last bit | dedicated header Viterbi, 134 pairs ≈ **625 clk** (from `viterbi_dec`'s FSM) |
+| descramble + CRC-16 + parse | — | ≈ 5 clk |
+| `cfg_body_syms` derivation (≤ 128-iteration accumulator) | ≤ 130 clk | ≤ 130 clk |
 | **L_cfg** | **≈ 150 clk** | **≈ 775 clk** |
 
-The first BODY bin reaches FD ≈ `32·C + 1` clocks after the last header bin.
-C = clocks per input sample, so T_sym = 288·C clocks per symbol.
-Required depth:
-`B1_syms = ceil((L_cfg − 32·C) / T_sym) + 1` (the +1 is the symbol arriving
-while the first drains).
-
-| C (clk/sample) | Operating point | B1, current header | B1, new header |
+| C | Operating point | B1, current header | B1, new header |
 |---|---|---|---|
-| 1 | testbench today | 2 symbols | **4 symbols** |
-| 5 | 20 Msps @ 100 MHz | 1 | 2 |
+| 1 | stress | 3 symbols | **5 symbols** |
+| 2.5 | 40 Msps @ 100 MHz | 1 | 2 |
 | 10 | 10 Msps @ 100 MHz | 1 | 2 |
 
-**Frozen:** parameter `BODY_BUF_SYMS`, default 4 (never hard-coded),
-storing all 256 bins at 2×25 bits: 1024 × 50 bits = **2 BRAM36**. This covers every operating point with the
-new header, so B1 never needs resizing for DMRS. All header-path terms
-above are **calculated**. The stage testbenches **measure** the actual
-latency from the last header item leaving FD to `cfg_valid`, and assert
-that `BODY_BUF_SYMS` is still enough at the tested C:
-`ceil((L_meas − 32·C) / (288·C)) + 1 ≤ BODY_BUF_SYMS`. If a later header
-decoder changes the latency, this assertion catches it.
+**Decided (step 3b review): `BODY_BUF_SYMS = 5`** (parameter, never
+hard-coded): 1,280 entries. An entry is the full bin
+(2 × FFT_W) plus its metadata. BRAM cost is measured in 3c. One more symbol
+than the C=1 worst case measured so far, so the stress case keeps margin.
 
-The bound assumes the header's LLRs are not queued behind a backlog of the
-previous frame's payload in B2 (next section). That holds at C ≥ the
-rate-contract minimum. At C=1 it holds only with a guard gap between
-frames.
+**Measured B1 high-water (run_fd_stage.py, 87 scenarios, every run reports it):**
+
+| Scenario | C=1 | C=2.5 | C=10 |
+|---|---|---|---|
+| normal (config 150 clk after header out) | 335 | 74 | 1 |
+| random output stalls | 360 | — | 1 |
+| config delayed 2.5 symbols | 841 | — | 624 |
+| wrong-`fseq` decoy, then config | 585 | — | 368 |
+| two frames back to back, first config late | 1,024 | — | 560–624 |
+| five frames, legal `fseq` wrap | 1,024 | — | 1 |
+| **worst over the suite** | **1,024 / 1,280 (80%)** | | |
+
+Max B2 occupancy over the suite: 207 / 512 (C=1 with 20% stalls).
+
+**Frame residency checks (hardware, sticky; tested both ways):**
+- `st_fseq_collision`: a frame entered on an `fseq` whose previous frame has
+  not retired. Retired = none of its bins in B1, and its last output item
+  accepted (`frame_end`, or the last header group for a `cfg_err` frame).
+  Everything after B1 is in order, so the last item leaving means all
+  have. The per-`fseq` config entry is cleared at exactly this moment, so
+  the check proves the clear is safe. Positive test: five frames with
+  `fseq` 0,1,2,3,0 (no flag). Negative test: two consecutive frames with
+  `fseq` 0 (flag fires).
+- `st_hdr_no_train`: negative test with the training symbol removed fires it.
+- `st_hq_held`: whether a header ever had to wait behind an older frame's
+  data still in CPE. **It never did in any test.** With today's block
+  latencies, the next frame's header cannot reach the equalizer until its
+  training symbol (256 bins) and the H sweep (~270 clocks) are through, by
+  which time the previous frame's CPE has finished (≈ 270 clocks of
+  margin at C=1). Frame order through the header queue is verified by the
+  strict output-sequence check in the back-to-back and wrap tests; the
+  queue itself is a safety net for future latency changes (DMRS, a faster
+  estimator) and has not yet been triggered.
 
 **Header FEC requirement (frozen as architecture, not implementation).**
 Header FEC decoding is independent of payload FEC decoding and can never
@@ -633,7 +685,7 @@ this refactor, which is the point.
 2. Default regression rate C=10, with C=1 kept as a stress build.
 3. LLR_W=1 during the refactor (hard, bit-exact). Soft later is a
    parameter change.
-4. `BODY_BUF_SYMS = 4` (2 BRAM36), sized now for the new header.
+4. `BODY_BUF_SYMS = 5` (decided after step 3b; see §9 B1).
 5. A dedicated header Viterbi in BD for the new format (≈ +3.1k LUT if it
    copies `viterbi_dec` as-is; a header-only instance could be smaller.
    Measure in step 7).

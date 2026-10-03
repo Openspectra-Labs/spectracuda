@@ -13,8 +13,9 @@
 // Push and pop may happen in the same cycle, every cycle: a full-rate
 // stream passes straight through with two cycles of latency.
 //
-// DEPTH must be a power of two (pointer wrap). `level` counts the head
-// too. Pushing while full is a caller bug: the item is dropped and
+// Any DEPTH (B1 is 5 x 256 = 1280): addresses wrap explicitly and
+// occupancy is a counter, not a pointer difference. `level` counts the
+// head too. Pushing while full is a caller bug: the item is dropped and
 // `overflow` latches (sticky) so it can never pass silently.
 // ============================================================
 `timescale 1ns / 1ps
@@ -40,41 +41,41 @@ module sync_fifo_fwft #(
 );
     localparam integer AW = $clog2(DEPTH);
 
-    reg [WIDTH-1:0] mem [0:DEPTH-1];
-    reg [AW:0] wr, rd;
+    localparam [AW-1:0] LAST = AW'(DEPTH - 1);
 
-    wire [AW:0] stored    = wr - rd;               // in memory, not yet at head
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [AW-1:0] wa, ra;
+    reg [AW:0]   stored;                           // in memory, not yet at head
+
     wire        mem_empty = (stored == {(AW+1){1'b0}});
     assign      full      = (stored == (AW+1)'(DEPTH));
     assign      level     = stored + {{AW{1'b0}}, head_valid};
 
+    wire do_push = push && !full;
     wire do_pop  = pop && head_valid;
     wire do_load = !mem_empty && (!head_valid || do_pop);
 
     always @(posedge clk) begin
-        if (push && !full) mem[wr[AW-1:0]] <= push_data;
-        if (do_load)       head_data <= mem[rd[AW-1:0]];
+        if (do_push) mem[wa] <= push_data;
+        if (do_load) head_data <= mem[ra];
     end
 
     always @(posedge clk) begin
         if (rst) begin
-            wr <= {(AW+1){1'b0}};
-            rd <= {(AW+1){1'b0}};
+            wa <= {AW{1'b0}};
+            ra <= {AW{1'b0}};
+            stored     <= {(AW+1){1'b0}};
             head_valid <= 1'b0;
             overflow   <= 1'b0;
             underflow  <= 1'b0;
         end else begin
-            if (push) begin
-                if (full) overflow <= 1'b1;
-                else      wr <= wr + 1'b1;
-            end
+            if (push && full) overflow <= 1'b1;
             if (pop && !head_valid) underflow <= 1'b1;
-            if (do_load) begin
-                rd <= rd + 1'b1;
-                head_valid <= 1'b1;
-            end else if (do_pop) begin
-                head_valid <= 1'b0;
-            end
+            if (do_push) wa <= (wa == LAST) ? {AW{1'b0}} : wa + 1'b1;
+            if (do_load) ra <= (ra == LAST) ? {AW{1'b0}} : ra + 1'b1;
+            stored <= stored + {{AW{1'b0}}, do_push} - {{AW{1'b0}}, do_load};
+            if (do_load)     head_valid <= 1'b1;
+            else if (do_pop) head_valid <= 1'b0;
         end
     end
 endmodule
