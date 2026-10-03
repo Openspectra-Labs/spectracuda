@@ -18,8 +18,10 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+# The pinned golden model, NOT the working-tree spectracuda -- see golden_ref.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import golden_ref  # noqa: E402
+golden_ref.use()
 
 from spectracuda.fec.viterbi import ConvolutionalCode  # noqa: E402
 

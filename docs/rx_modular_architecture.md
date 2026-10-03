@@ -243,6 +243,16 @@ detection clock, which depended on the input rate. Fixes in
 **Proof:** 9 frame configs (incl. CFO 0.3, and CFO 0.2 at EVM 0.08) × C =
 1, 2.5, 5, 10, 20: all 45 bit-exact against Python, and the FFT output
 (I1) is bit-identical across all five rates for every config.
+Reproduce from the branch: `hls/rtl/setup_ref.sh && hls/rtl/rate_matrix.sh`.
+
+*Correction (review of 0105e39):* the 45 runs were first done in an
+uncommitted scratch worktree pinned at `ad0a396`; the committed
+`run_frame.py` imported the working-tree spectracuda (protected header),
+so the result could not be reproduced from the branch, and its FEC hook
+took the header's conv_v27 call as the payload's. Fixed by
+`hls/rtl/golden_ref.py` (pinned reference, verified on import), a hook that
+records every call and refuses to guess, and the committed
+`rate_matrix.sh`. The matrix was then re-run from the branch.
 `check_chain.py` 11/11. Post-route WNS +0.149 ns, 13,582 LUT.
 
 Because H12 changes the FFT values at C=1, the frozen-RTL reference

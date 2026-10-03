@@ -24,6 +24,11 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+# The pinned golden model, NOT the working-tree spectracuda -- see golden_ref.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import golden_ref  # noqa: E402
+golden_ref.use()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUILD = os.path.join(HERE, "build")
 TRACE = os.path.join(BUILD, "trace")   # overridden by --trace-dir

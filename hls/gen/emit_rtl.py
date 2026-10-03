@@ -31,6 +31,9 @@ from typing import List
 
 import numpy as np
 
+# The pinned golden model, NOT the working-tree spectracuda -- see hls/rtl/golden_ref.py.
+from hls.rtl import golden_ref  # noqa: E402
+golden_ref.use()
 from spectracuda.pipeline import Ofdm
 
 from .emit import validate

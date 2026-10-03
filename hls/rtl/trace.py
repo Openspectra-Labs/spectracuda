@@ -25,6 +25,10 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+# The pinned golden model, NOT the working-tree spectracuda -- see golden_ref.py.
+from hls.rtl import golden_ref
+golden_ref.use()
+
 from spectracuda.fec.fec import FEC
 from spectracuda.interleaver.base import _PermutationInterleaverBase
 from spectracuda.modem.mapper import Modem

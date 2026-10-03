@@ -23,6 +23,9 @@ from typing import Any, Dict
 
 import numpy as np
 
+# The pinned golden model, NOT the working-tree spectracuda -- see hls/rtl/golden_ref.py.
+from hls.rtl import golden_ref  # noqa: E402
+golden_ref.use()
 from spectracuda.pipeline import Ofdm
 from spectracuda.sim import Channel
 

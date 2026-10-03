@@ -805,6 +805,22 @@ these in order. Each one catches a class of bug the others cannot.
     export XILINX_VIVADO=/home/abhi/work/xilinx/2025.2/Vivado
     export PATH=$XILINX_VIVADO/bin:$PATH      # Vivado is NOT on PATH
     cd hls/rtl
+    ./setup_ref.sh                            # ONCE: pinned Python reference
+
+**The Python reference is PINNED (2026-10-03).** The RTL implements the
+frame format of spectracuda `ad0a396` (uncoded 1-symbol header). Later
+commits changed it (e374fdf: CRC-16 + conv_v27 header, then DMRS, C2), so
+every harness script imports spectracuda from a worktree of `ad0a396`
+via `golden_ref.py` and refuses to run against anything else. Before this
+pin existed, run_frame.py silently used the working tree and failed with
+"header never decoded" / "2000 payload bits -> 268 encoded" (the header's
+conv_v27 call mistaken for the payload's).
+
+**0. Rate invariance, every C (~25 min).**
+
+    ./rate_matrix.sh      # 9 configs x C = 1, 2.5, 5, 10, 20; exit 0 = all pass
+
+Each run bit-exact vs Python AND FFT output identical to C=1.
 
 **1. Per-block, against golden vectors (seconds).**
 
