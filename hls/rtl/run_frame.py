@@ -71,6 +71,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bits", type=int, default=64)
     ap.add_argument("--cfo", type=float, default=0.0)
+    ap.add_argument("--cps", type=int, default=1,
+                    help="clocks per input sample (C): 1 = stress, 10 = 10 Msps @ 100 MHz")
     ap.add_argument("--modem", default="qam64")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--evm", type=float, default=0.0,
@@ -171,6 +173,7 @@ def main() -> None:
         f.write(f'`define RXT_HDR_PATH "{hdrp}"\n')
         f.write(f'`define RXT_UNIT_PATH "{unitp}"\n')
         f.write(f"`define RXT_NSAMP {rx.shape[-1]}\n")
+        f.write(f"`define RXT_CPS {a.cps}\n")
         f.write("`define RXT_DRAIN 200000\n")
         f.write(f"`define RXT_ENC_BITS {enc}\n")
         f.write(f"`define RXT_DI_UNITS {n_units}\n")

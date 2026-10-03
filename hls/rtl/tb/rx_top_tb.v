@@ -1,5 +1,9 @@
 `timescale 1ns / 1ps
 `include "build/rxtop_tb_params.vh"
+// Older harnesses (exp_*.py) do not set the input rate: default 1.
+`ifndef RXT_CPS
+`define RXT_CPS 1
+`endif
 
 module rx_top_tb;
     localparam integer NSAMP = `RXT_NSAMP;
@@ -55,11 +59,17 @@ module rx_top_tb;
         repeat (8) @(posedge clk);
         rst = 0;
         @(posedge clk);
+        // RXT_CPS = clocks per input sample (C). 1 is the stress rate;
+        // 10 is 10 Msps at 100 MHz. in_valid is high one cycle in C.
         for (i = 0; i < NSAMP; i = i + 1) begin
             @(negedge clk);
             in_i     = stim[i][31:16];
             in_q     = stim[i][15:0];
             in_valid = 1'b1;
+            repeat (`RXT_CPS - 1) begin
+                @(negedge clk);
+                in_valid = 1'b0;
+            end
         end
         @(negedge clk);
         in_valid = 1'b0;

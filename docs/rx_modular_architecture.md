@@ -1,7 +1,9 @@
 # RX modular architecture — time / frequency / bit domain
 
-Status: **PROPOSAL, not yet implemented.** Written 2026-10-03, before the
-refactor starts. No RTL has been changed to match this document yet.
+Status: **INTERFACES FROZEN (I1, I2, C1, symbol-type enum), 2026-10-03.**
+Implementation has not started. No RTL has been changed to match this
+document yet. See §5 H11: the baseline fails at realistic input rates,
+which blocks the C=10 regression until it is resolved.
 
 Baseline it refers to: branch `HDL_SPECTRA`, commit `c180a3a`
 (`hls/rtl/src/`). That commit is bit-exact against spectracuda at
@@ -187,6 +189,19 @@ as a wire into several stages.
 header is identified by `stype=HEADER` with `sym_start`. The bit count
 inside the header parser is that parser's own state.
 
+**H11. The baseline only works at 1 sample/clock (found 2026-10-03).**
+With `run_frame.py --cps 10` the baseline (`c180a3a`) detects the frame at
+sample 182 instead of 200 and never decodes the header. Two clock-vs-sample
+assumptions in `frame_sync.v`:
+- `S_REPLAY` emits one replayed sample **every clock**, whatever the input
+  rate. At C>1 the reader overtakes the ring writer and replays slots that
+  have not been written yet.
+- `cand_idx_now = wr − (2·LAG + SC_LATENCY)` subtracts `sc_sync`'s 3-*clock*
+  pipeline as 3 *samples*. Those are equal only at C=1.
+
+Nothing downstream of TD has ever been exercised at C>1 either. The C=10
+functional regression cannot start until this is resolved (§11).
+
 ---
 
 ## 6. Counters and state: fate of each
@@ -224,6 +239,13 @@ inside the header parser is that parser's own state.
 - `fseq` is a 2-bit frame sequence number assigned by TD at each frame
   start, modulo 4. Data and config are both tagged with it, so a consumer
   never applies frame N's config to frame N+1's data.
+  **Wrap rule:** four values do NOT mean four frames may be outstanding.
+  Before TD reuses an `fseq` value, the previous frame carrying that value
+  must have fully retired from every stage and buffer (TD, B1, FD pipeline,
+  B2, BD, and the C1 bundle). Every stage testbench and the end-to-end
+  testbench carry a **simulation assertion** that fires if an `fseq` value
+  enters a stage while an older frame with the same value is still
+  resident anywhere. Widening `fseq` later is a width change only.
 - One symbol-type enum for the whole receiver, `rx_stype.vh` (3 bits):
 
 | Code | Name | Who assigns it | Appears on |
@@ -270,6 +292,10 @@ One transfer = one data subcarrier's group of LLRs.
 | `ll_fseq` | 2 | frame sequence number |
 | `ll_frame_start` | 1 | first group of the frame (= first header group) |
 | `ll_frame_end` | 1 | last group of the last DATA/C2 symbol of the frame. FD can assert it because it knows `cfg_body_syms`. |
+
+**I2 is frozen in this soft-ready form.** The refactor instantiates
+`LLR_W=1`. Moving to LLR_W=4/6 later changes only the parameter, never the
+protocol (fields, order, handshake, `ll_n` semantics).
 
 **LLR convention.** LLR = log P(b=0)/P(b=1), signed two's complement,
 LLR_W bits. **The hard decision is the sign bit (MSB) in every width.**
@@ -404,17 +430,26 @@ while the first drains).
 | 5 | 20 Msps @ 100 MHz | 1 | 2 |
 | 10 | 10 Msps @ 100 MHz | 1 | 2 |
 
-**Proposal:** `BODY_BUF_SYMS = 4`, storing all 256 bins at 2×25 bits:
-1024 × 50 bits = **2 BRAM36**. This covers every operating point with the
+**Frozen:** parameter `BODY_BUF_SYMS`, default 4 (never hard-coded),
+storing all 256 bins at 2×25 bits: 1024 × 50 bits = **2 BRAM36**. This covers every operating point with the
 new header, so B1 never needs resizing for DMRS. All header-path terms
-above are **calculated**. `tb_rx_bit_domain` must measure the real
-header-to-`cfg_valid` latency and assert it is ≤ the budget.
+above are **calculated**. The stage testbenches **measure** the actual
+latency from the last header item leaving FD to `cfg_valid`, and assert
+that `BODY_BUF_SYMS` is still enough at the tested C:
+`ceil((L_meas − 32·C) / (288·C)) + 1 ≤ BODY_BUF_SYMS`. If a later header
+decoder changes the latency, this assertion catches it.
 
 The bound assumes the header's LLRs are not queued behind a backlog of the
 previous frame's payload in B2 (next section). That holds at C ≥ the
 rate-contract minimum. At C=1 it holds only with a guard gap between
-frames. The header decoder is a **dedicated** instance inside BD, so it
-never waits for the payload Viterbi.
+frames.
+
+**Header FEC requirement (frozen as architecture, not implementation).**
+Header FEC decoding is independent of payload FEC decoding and can never
+wait for the payload Viterbi. The implementation is NOT frozen: a copy of
+`viterbi_dec` may be used first because it is easy to verify, but a smaller
+header-specific decoder (fixed 134-pair length, known tail) must be
+evaluated before accepting ~3.1k LUT.
 
 ### B2, FD egress FIFO (bit-domain backpressure)
 
@@ -424,22 +459,26 @@ never waits for the payload Viterbi.
 ```
 
 Everything before B2 is free-running at the input rate. Only B2's read
-side sees `ll_ready`. **No FIFO can make "`ll_ready=0` forever" safe**, so
-the guarantee is a contract with two parts:
+side sees `ll_ready`.
 
-1. **Rate:** BD's sustained consumption ≥ FD's average production at the
+**No finite B2 depth is a substitute for the sustained-rate contract.**
+B2 absorbs burstiness and temporary backpressure only. The two
+requirements are separate and both must hold:
+
+1. **Average-rate requirement:** BD's sustained consumption ≥ FD's average production at the
    configured C. The payload Viterbi ingests 84 coded bits per 171 clocks
    (0.491 bit/clk). FD produces 216·bps bits per 288·C clocks. So it's
    sustainable iff C ≥ 216·bps / (0.491·288): **QPSK C ≥ 3.1, 16-QAM
    C ≥ 6.1, 64-QAM C ≥ 9.2.** At 10 Msps / 100 MHz (C=10) every MCS fits.
    64-QAM has a 1.09× margin, the tightest number in the receiver
    (rundown §15).
-2. **Depth:** B2 absorbs the burstiness within a symbol (216 groups in 256
+2. **Burst-depth requirement:** B2 absorbs the burstiness within a symbol (216 groups in 256
    clocks, then a gap). At C=10 that is **≤ 1 symbol** (216 entries).
 
-At C=1 the rate contract fails for every MCS. That is why today's
-coded-bit FIFO holds a **whole frame** (128 × 216 entries). For the refactor
-B2 keeps that depth in the C=1 regression build (bit-exact, same memory
+At C=1 the average-rate requirement fails for every MCS. Today's
+coded-bit FIFO holds a **whole frame** (128 × 216 entries), which only
+postpones overflow to the next frame. It does not fix the mismatch. For
+the refactor B2 keeps that depth in the C=1 build (bit-exact, same memory
 as today), as a parameter `B2_DEPTH`. `fifo_overflow` stays as a sticky
 hardware check that must never fire.
 
@@ -481,8 +520,18 @@ TD test fails → sync / CFO / CP / FFT;
 FD test fails → channel estimate / equalizer / CPE / demapper;
 BD test fails → header / FEC / deinterleaver.
 
-Rate harnesses: every stage testbench runs at **C=10** (default) and
-**C=1** (stress), from day one.
+### Three rate regimes, kept separate
+
+| Regime | C | Purpose | Rules |
+|---|---|---|---|
+| Functional (default) | 10 | modularity + bit-exact regression | must pass on every step |
+| Stress / burst | 1 | burst handling, B1/B2 corner cases | **single frame, or inter-frame guard ≥ B2/BD drain time.** C=1 is not a valid continuous-rate test: the Viterbi cannot sustain it. |
+| `PERFORMANCE_C` | from the PHY target clock / sample rate (e.g. 100 MHz / 10 Msps = 10; 100 MHz / 20 Msps = 5) | throughput: back-to-back frames, worst MCS, sustained | asserts the average-rate requirement (§9) and no overflow; **reports** margin |
+
+Throughput optimization and modular refactoring are separate problems.
+Functional regression at C=10 must not be read as a throughput result,
+and a `PERFORMANCE_C` failure is a throughput finding, not a
+modularity regression.
 
 ---
 
@@ -492,8 +541,10 @@ Each step ends with the stage testbench plus the end-to-end regression,
 bit-exact. No algorithm, width or rounding changes until step 6 is done.
 
 1. ✅ Mapping (this document §1–6).
-2. Freeze interfaces (this document §7). Add `rx_stype.vh` (3-bit enum).
-   Capture frozen-RTL dumps at I1 and I2 from `c180a3a`.
+2. ✅ Interfaces frozen (§7). Remaining in this step: `rx_stype.vh` (3-bit
+   enum) + `rx_if.vh` (interface widths); frozen-RTL dumps at I1/I2 from
+   `c180a3a` (C=1, the only rate the baseline works at).
+   **Blocked on H11 for C=10.**
 3. **FD**: I1 in, I2 out; B1 + classify (all BODY → DATA); metadata
    through `grid_extract`/`ls_chanest`/`mmse_eq`/`pilot_cpe`; demapper moves
    in with BPSK; B2. `tb_rx_freq_domain`.
