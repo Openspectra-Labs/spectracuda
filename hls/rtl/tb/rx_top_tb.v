@@ -14,7 +14,14 @@ module rx_top_tb;
     localparam integer NSAMP = `RXT_NSAMP;
 
     reg clk = 0, rst = 1;
-    always #5 clk = ~clk;
+    always #5 clk = ~clk;                 // TD + FD: 100 MHz
+    // bit domain: its own, asynchronous clock (RXT_BD_HALF_PS half period,
+    // default 4000 ps = 125 MHz)
+`ifndef RXT_BD_HALF_PS
+`define RXT_BD_HALF_PS 4000
+`endif
+    reg clk_bd = 0;
+    always #(`RXT_BD_HALF_PS * 1ps) clk_bd = ~clk_bd;
 
     reg signed [15:0] in_i, in_q;
     reg in_valid;
@@ -34,7 +41,7 @@ module rx_top_tb;
     rx_top dut (
         .cfg_encoded_bits(16'd`RXT_ENC_BITS), .cfg_di_units(13'd`RXT_DI_UNITS),
         .cfg_di_rows(13'd`RXT_DI_ROWS), .cfg_di_cols(13'd`RXT_DI_COLS),
-        .clk(clk), .rst(rst), .in_i(in_i), .in_q(in_q), .in_valid(in_valid),
+        .clk(clk), .rst(rst), .clk_bd(clk_bd), .in_i(in_i), .in_q(in_q), .in_valid(in_valid),
         .hdr_valid(hdr_valid), .payload_len_bits(payload_len_bits),
         .mod_scheme(mod_scheme), .fec0_code(fec0_code), .fec1_code(fec1_code),
         .crc_code(crc_code), .out_unit(out_unit),
@@ -63,7 +70,7 @@ module rx_top_tb;
     integer fd, fu, i, nunits;
     reg hdr_seen = 0;
 
-    always @(posedge clk) begin
+    always @(posedge clk_bd) begin  // byte / header outputs are clk_bd
         if (!rst) begin
             if (hdr_valid && !hdr_seen) begin
                 hdr_seen <= 1'b1;

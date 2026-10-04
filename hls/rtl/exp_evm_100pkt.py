@@ -27,7 +27,7 @@ NBYTES, PN_ALPHA, WORKERS = 2048, 0.9995, 8
 EVMS = [0.12, 0.14, 0.16, 0.18]
 NPKT = 100
 
-SRCS = ["tb/rx_top_tb.v", "src/rx_top.v", "src/rx_time_domain.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v", "src/rx_bit_domain.v", "src/sc_sync_rtl.v", "src/frame_sync.v",
+SRCS = ["tb/rx_top_tb.v", "src/rx_top.v", "src/rx_time_domain.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v", "src/rx_bit_domain.v", "src/cdc_async_fifo.v", "src/cdc_bundle.v", "src/cdc_reset_sync.v", "src/sc_sync_rtl.v", "src/frame_sync.v",
         "src/cfo_estimate.v", "src/cfo_correct.v", "src/cordic_rot.v",
         "src/cordic_vec.v", "src/cp_fft.v", "src/grid_extract.v",
         "src/ls_chanest.v", "src/mmse_eq.v", "src/pilot_cpe.v",

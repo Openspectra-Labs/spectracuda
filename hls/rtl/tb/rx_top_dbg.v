@@ -12,7 +12,7 @@ module rx_top_dbg;
     rx_top dut (
         .cfg_encoded_bits(16'd`RXT_ENC_BITS), .cfg_di_units(13'd`RXT_DI_UNITS),
         .cfg_di_rows(13'd`RXT_DI_ROWS), .cfg_di_cols(13'd`RXT_DI_COLS),
-        .clk(clk), .rst(rst), .in_i(in_i), .in_q(in_q), .in_valid(in_valid),
+        .clk(clk), .rst(rst), .clk_bd(clk), .in_i(in_i), .in_q(in_q), .in_valid(in_valid),
         .hdr_valid(hdr_valid), .payload_len_bits(plen), .mod_scheme(mods),
         .fec0_code(f0), .fec1_code(f1), .crc_code(cc), .out_unit(ounit),
         .out_unit_valid(out_unit_valid), .frame_done(frame_done),

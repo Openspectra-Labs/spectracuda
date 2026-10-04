@@ -85,8 +85,9 @@ module rx_top #(
     parameter integer SHIFT_FFT_TO_CE = 3,
     parameter integer SHIFT_FFT_TO_EQ = 3
 )(
-    input  wire                       clk,
+    input  wire                       clk,      // TD + FD (100 MHz target)
     input  wire                       rst,
+    input  wire                       clk_bd,   // bit domain (125 MHz target), asynchronous to clk
 
     // ---- HOST-SUPPLIED FRAME GEOMETRY --------------------------------
     // The header carries payload_len_bits, which is the INFORMATION
@@ -243,25 +244,63 @@ module rx_top #(
         .st_hq_held(), .st_b1_level(), .st_b1_hwm(fd_b1_hwm), .st_b2_hwm(fd_b2_hwm));
 
     // =================================================================
-    // Bit domain: FD->BIT stream in, C1 out, bytes out.
+    // Clock crossing (infrastructure, like an AXIS clock converter in a
+    // block design): FD and BD do not know each other's clock.
+    // =================================================================
+    wire rst_bd;
+    cdc_reset_sync u_rst_bd (.clk(clk_bd), .rst_in(rst), .rst_out(rst_bd));
+
+    // FD -> BIT stream: async FIFO, every field crosses together
+    localparam integer I2_W = 6*LLR_W + 3 + 8 + 8 + 3 + 2 + 4;
+    wire              bd_in_valid, bd_in_ready;
+    wire [6*LLR_W-1:0] bd_in_llr;
+    wire [2:0]        bd_in_n, bd_in_stype;
+    wire [7:0]        bd_in_sc, bd_in_sym_idx;
+    wire [1:0]        bd_in_fseq;
+    wire              bd_in_ss, bd_in_se, bd_in_fs, bd_in_fe;
+    cdc_async_fifo #(.WIDTH(I2_W), .DEPTH(16)) u_i2_cdc (
+        .wclk(clk), .wrst(rst), .w_valid(fd_out_valid), .w_ready(fd_out_ready),
+        .w_data({fd_out_llr, fd_out_n, fd_out_sc, fd_out_sym_idx, fd_out_stype,
+                 fd_out_fseq, fd_out_sym_start, fd_out_sym_end,
+                 fd_out_frame_start, fd_out_frame_end}),
+        .rclk(clk_bd), .rrst(rst_bd), .r_valid(bd_in_valid), .r_ready(bd_in_ready),
+        .r_data({bd_in_llr, bd_in_n, bd_in_sc, bd_in_sym_idx, bd_in_stype,
+                 bd_in_fseq, bd_in_ss, bd_in_se, bd_in_fs, bd_in_fe}));
+
+    // C1 config: published on clk_bd, used on clk (FD, TD): atomic bundle
+    wire       bd_cfg_valid, bd_cfg_err;
+    wire [1:0] bd_cfg_fseq, bd_cfg_dmrs;
+    wire [2:0] bd_cfg_mod;
+    wire [7:0] bd_cfg_body, bd_cfg_c2;
+    cdc_bundle #(.WIDTH(25)) u_c1_cdc (
+        .src_clk(clk_bd), .src_rst(rst_bd),
+        .src_data({bd_cfg_valid, bd_cfg_err, bd_cfg_fseq, bd_cfg_mod, bd_cfg_body,
+                   bd_cfg_c2, bd_cfg_dmrs}),
+        .dst_clk(clk), .dst_rst(rst),
+        .dst_data({cfg_valid, cfg_err, cfg_fseq, cfg_mod, cfg_body_syms,
+                   cfg_c2_syms, cfg_dmrs_period}));
+
+    // =================================================================
+    // Bit domain (clk_bd): FD->BIT stream in, C1 out, bytes out.
+    // Its byte / header / status outputs are in the clk_bd domain.
     // =================================================================
     rx_bit_domain #(.LLR_W(LLR_W), .MAX_PAYLOAD_SYM(MAX_PAYLOAD_SYM)) u_bd (
-        .clk(clk), .rst(rst),
-        .in_valid(fd_out_valid), .in_ready(fd_out_ready), .in_llr(fd_out_llr),
-        .in_n(fd_out_n), .in_sc(fd_out_sc), .in_sym_idx(fd_out_sym_idx),
-        .in_stype(fd_out_stype), .in_fseq(fd_out_fseq),
-        .in_sym_start(fd_out_sym_start), .in_sym_end(fd_out_sym_end),
-        .in_frame_start(fd_out_frame_start), .in_frame_end(fd_out_frame_end),
+        .clk(clk_bd), .rst(rst_bd),
+        .in_valid(bd_in_valid), .in_ready(bd_in_ready), .in_llr(bd_in_llr),
+        .in_n(bd_in_n), .in_sc(bd_in_sc), .in_sym_idx(bd_in_sym_idx),
+        .in_stype(bd_in_stype), .in_fseq(bd_in_fseq),
+        .in_sym_start(bd_in_ss), .in_sym_end(bd_in_se),
+        .in_frame_start(bd_in_fs), .in_frame_end(bd_in_fe),
         .cfg_encoded_bits(cfg_encoded_bits), .cfg_di_units(cfg_di_units),
         .cfg_di_rows(cfg_di_rows), .cfg_di_cols(cfg_di_cols),
-        .cfg_valid(cfg_valid), .cfg_err(cfg_err), .cfg_fseq(cfg_fseq),
-        .cfg_mod(cfg_mod), .cfg_body_syms(cfg_body_syms),
-        .cfg_c2_syms(cfg_c2_syms), .cfg_dmrs_period(cfg_dmrs_period),
+        .cfg_valid(bd_cfg_valid), .cfg_err(bd_cfg_err), .cfg_fseq(bd_cfg_fseq),
+        .cfg_mod(bd_cfg_mod), .cfg_body_syms(bd_cfg_body),
+        .cfg_c2_syms(bd_cfg_c2), .cfg_dmrs_period(bd_cfg_dmrs),
         .hdr_payload_len_bits(payload_len_bits), .hdr_mod_scheme(mod_scheme),
         .hdr_fec0(fec0_code), .hdr_fec1(fec1_code), .hdr_crc(crc_code),
         .out_valid(out_unit_valid), .out_byte(out_unit), .out_last(),
         .out_fseq(), .frame_done(frame_done),
         .st_cb_overflow(fifo_overflow), .st_unit_collision(bd_err[0]),
         .st_seq_err(bd_err[1]), .st_cb_hwm(bd_cb_hwm));
-    assign hdr_valid = cfg_valid;
+    assign hdr_valid = bd_cfg_valid;      // clk_bd domain, with the header fields
 endmodule

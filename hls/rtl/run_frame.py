@@ -35,7 +35,7 @@ BUILD = os.path.join(HERE, "build")
 GUARD = 200
 FULL_SCALE = (1 << 15) - 1
 
-SRCS = ["tb/rx_top_tb.v", "src/rx_top.v", "src/rx_time_domain.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v", "src/rx_bit_domain.v", "src/sc_sync_rtl.v", "src/frame_sync.v",
+SRCS = ["tb/rx_top_tb.v", "src/rx_top.v", "src/rx_time_domain.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v", "src/rx_bit_domain.v", "src/cdc_async_fifo.v", "src/cdc_bundle.v", "src/cdc_reset_sync.v", "src/sc_sync_rtl.v", "src/frame_sync.v",
         "src/cfo_estimate.v", "src/cfo_correct.v", "src/cordic_rot.v",
         "src/cordic_vec.v", "src/cp_fft.v", "src/grid_extract.v",
         "src/ls_chanest.v", "src/mmse_eq.v", "src/pilot_cpe.v",
@@ -82,6 +82,8 @@ def main() -> None:
                          "to this directory -- see tb/capture_taps.vh")
     ap.add_argument("--dump-i1", default=None,
                     help="write the FFT output (I1) bins to this file")
+    ap.add_argument("--bd-mhz", type=float, default=125.0,
+                    help="bit-domain clock (TD/FD run at 100 MHz)")
     ap.add_argument("--cps", type=float, default=1.0,
                     help="clocks per input sample (C): 1 = stress, 10 = 10 Msps "
                          "@ 100 MHz, 2.5 = 40 Msps @ 100 MHz")
@@ -210,6 +212,7 @@ def main() -> None:
         from fractions import Fraction
         cps = Fraction(a.cps).limit_denominator(16)
         f.write(f"`define RXT_CPS_NUM {cps.numerator}\n`define RXT_CPS_DEN {cps.denominator}\n")
+        f.write(f"`define RXT_BD_HALF_PS {int(round(500000.0 / a.bd_mhz))}\n")
         if a.capture:
             os.makedirs(a.capture, exist_ok=True)
             f.write(f'`define RXT_CAPTURE_DIR "{os.path.abspath(a.capture)}"\n')
