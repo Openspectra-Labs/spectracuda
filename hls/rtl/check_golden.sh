@@ -20,12 +20,30 @@ for d in golden_if/f*/; do
     out="$TMP/$name.c$c"
     "$PY" run_frame.py --bits $1 --modem $2 --cfo $3 --evm $4 --cps $c --capture "$out" > "$out.log" 2>&1
     bad=""
-    for f in stim.hex i1.txt i2.txt c1.txt o1.txt; do
+    for f in stim.hex i2.txt c1.txt o1.txt; do
       cmp -s "$d/$f" "$out/$f" || bad="$bad $f"
     done
+    # I1: the reference must be an exact PREFIX. Since step 3c the time
+    # domain keeps capturing BODY symbols until the config says how many
+    # there are, so it may emit a few extra trailing ones -- the frequency
+    # domain drops them (frozen I1 contract: no frame_end). Every extra
+    # item must be BODY, same frame, sym_idx past the declared length.
+    extra=$("$PY" - "$d" "$out" <<'PYEOF'
+import sys
+gold = open(sys.argv[1] + "/i1.txt").read().splitlines()
+new  = open(sys.argv[2] + "/i1.txt").read().splitlines()
+body = int(dict(l.split() for l in open(sys.argv[1] + "/c1.txt"))["cfg_body_syms"])
+if new[:len(gold)] != gold:
+    print("MISMATCH"); sys.exit()
+bad = [l for l in new[len(gold):]
+       if not (l.split()[3] == "2" and int(l.split()[1]) >= 2 + body)]
+print("BADEXTRA" if bad else f"OK+{(len(new) - len(gold)) // 256}")
+PYEOF
+)
+    case "$extra" in OK*) ;; *) bad="$bad i1.txt($extra)";; esac
     v=$(grep -oE "VERDICT: .*" "$out.log" || echo "VERDICT: ERROR")
     if [ -z "$bad" ] && echo "$v" | grep -q "PASS"; then
-      echo "$name C=$c: identical to golden ($v)"
+      echo "$name C=$c: identical to golden, I1 $extra extra trailing BODY symbols dropped by FD ($v)"
     else
       echo "$name C=$c: MISMATCH:${bad:- none} ($v) -- see $out"; fail=$((fail+1))
     fi

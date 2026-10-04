@@ -24,14 +24,17 @@ module rx_bit_decoder #(
     input  wire                   rst,
     input  wire                   frame_start,
 
-    input  wire signed [EQ_W-1:0] cpe_re,
-    input  wire signed [EQ_W-1:0] cpe_im,
-    input  wire                   cpe_out_valid,
+    // STEP-3 TEMPORARY: the demapper moved into rx_freq_domain, so this
+    // legacy block now takes its already-demapped bits (from rx_top's
+    // I2 adapter) instead of equalized symbols. The whole block is
+    // replaced by rx_bit_domain in step 4.
+    input  wire [5:0]             dm_bits,      // MSB-first, as the demapper emitted them
+    input  wire [3:0]             dm_nbits,
+    input  wire                   dm_valid,
 
     // From rx_header.
     input  wire                   hdr_done,
     input  wire [3:0]             hdr_bps,
-    input  wire [1:0]             dm_scheme,
 
     // Host-supplied geometry (see rx_top.v).
     input  wire [15:0]            cfg_encoded_bits,
@@ -50,16 +53,6 @@ module rx_bit_decoder #(
     // ---------------------------------------------------------------
     // 10. Payload: demap -> bit FIFO -> Viterbi -> deinterleave
     // ---------------------------------------------------------------
-    wire [5:0] dm_bits;
-    wire [3:0] dm_nbits;
-    wire dm_valid;
-
-    demapper #(.W(EQ_W)) u_dm (
-        .clk(clk), .rst(rst),
-        .y_re(cpe_re), .y_im(cpe_im), .mod_scheme(dm_scheme),
-        .in_valid(cpe_out_valid),
-        .bits(dm_bits), .n_bits(dm_nbits), .out_valid(dm_valid),
-        .in_meta(1'b0), .out_meta());
 
     // ---- coded-bit FIFO, WORD-WIDE ---------------------------------
     // Stores one demapper output per entry, NOT one bit. A 1-bit-wide

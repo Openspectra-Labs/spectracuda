@@ -18,7 +18,7 @@ read_ip "$root/build/ip/xfft_256/xfft_256.xci"
 generate_target synthesis [get_ips xfft_256]
 synth_ip [get_ips xfft_256]
 
-foreach f {rx_top rx_time_domain rx_freq_domain_legacy rx_header rx_bit_decoder
+foreach f {rx_top rx_time_domain rx_freq_domain sync_fifo_fwft rx_header rx_bit_decoder
            sc_sync_rtl frame_sync cfo_estimate cfo_correct
            cordic_rot cordic_vec cp_fft grid_extract ls_chanest
            mmse_eq pilot_cpe header_decode demapper viterbi_dec
@@ -27,7 +27,7 @@ foreach f {rx_top rx_time_domain rx_freq_domain_legacy rx_header rx_bit_decoder
 }
 set_property include_dirs [list "$root/src" "$root/src/generated"] [current_fileset]
 
-foreach f [get_files -quiet {*grid_extract.v *header_decode.v *frame_sync.v *pilot_cpe.v *rx_top.v *rx_time_domain.v *rx_freq_domain_legacy.v *rx_header.v *rx_bit_decoder.v}] {
+foreach f [get_files -quiet {*grid_extract.v *header_decode.v *frame_sync.v *pilot_cpe.v *rx_top.v *rx_time_domain.v *rx_freq_domain.v *sync_fifo_fwft.v *rx_header.v *rx_bit_decoder.v}] {
     set_property file_type SystemVerilog $f
 }
 

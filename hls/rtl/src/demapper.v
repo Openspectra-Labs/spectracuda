@@ -102,7 +102,7 @@ module demapper #(
     // BPSK's decision is bit = ~sign(re): exactly the decision rx_top used
     // to make inline for the header. The QAM scale/bias path still runs
     // (with QPSK constants) for a BPSK item; its result is not used.
-    wire              is_bpsk = (mod_scheme == 2'(`DM_BPSK));
+    wire              is_bpsk = (mod_scheme == `DM_BPSK);   // plain Verilog: no SV cast (rundown s6)
     reg               d1_bpsk, d2_bpsk;
     reg               d1_bbit, d2_bbit;
     reg  [META_W-1:0] d1_meta, d2_meta;

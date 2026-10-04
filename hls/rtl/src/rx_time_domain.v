@@ -13,8 +13,11 @@
 // The frame phase FSM lives here because it counts TIME-DOMAIN samples.
 // It is also the one place that knows which slot is training, header or
 // payload, so it sets the symbol-type tag (rx_stype.vh) that rides with
-// the bins from here on. n_pay_sym comes back from rx_header: the FSM
-// needs it to know when the payload ends.
+// the bins from here on. The frame length comes back on the C1 config
+// interface (cfg_body_syms, only meaningful while cfg_body_valid): until
+// it arrives the FSM keeps capturing BODY symbols, and the frequency
+// domain drops any past the real end (docs/rx_modular_architecture.md
+// section 7, I1 has no frame_end).
 //
 // Moved verbatim out of rx_top.v (sections 1-4); see that file's
 // history notes for why each register stage is there.
@@ -34,8 +37,14 @@ module rx_time_domain #(
     input  wire signed [SAMPLE_W-1:0] in_q,
     input  wire                       in_valid,
 
-    // Payload length in symbols, from rx_header. Ends the payload phase.
-    input  wire [7:0]                 n_pay_sym,
+    // C1: frame length after the header, in OFDM symbols. Read ONLY
+    // while cfg_body_valid. It used to be rx_header's n_pay_sym read
+    // unconditionally -- reset value 1, so if the header had not been
+    // decoded by the end of the first payload slot the frame silently
+    // ended after one symbol (doc H2). Exposed in step 3c, when the new
+    // frequency domain correctly made the header wait for its H.
+    input  wire                       cfg_body_valid,
+    input  wire [7:0]                 cfg_body_syms,
 
     // Frame boundary: one pulse at the first replayed sample. Every
     // downstream wrapper uses it to reset its per-frame state.
@@ -183,7 +192,10 @@ module rx_time_domain #(
             end else ph_cnt <= ph_cnt + 1'b1;
             PH_PAY: if (slot_last) begin
                 ph_cnt <= 16'd0;
-                if (slot_idx >= n_pay_sym - 1'b1) begin
+                // Known length: stop after it. Unknown: keep going (FD drops
+                // the extras), bounded by what frame_sync replays.
+                if ((cfg_body_valid && slot_idx >= cfg_body_syms - 1'b1) ||
+                    slot_idx == 8'(MAX_PAYLOAD_SYM - 1)) begin
                     phase <= PH_IDLE; slot_idx <= 8'd0;
                 end else slot_idx <= slot_idx + 1'b1;
             end else ph_cnt <= ph_cnt + 1'b1;

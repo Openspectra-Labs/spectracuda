@@ -62,8 +62,15 @@ module grid_extract #(
     localparam [7:0]   LAST_BIN = 8'(N_FFT - 1);
 
     // 2-bit type per bin: 0 null, 1 data, 2 pilot.
-    reg [1:0] sctype [0:N_FFT-1];
-    reg [7:0] scord  [0:N_FFT-1];
+    //
+    // DISTRIBUTED ROM, on purpose. Left to itself Vivado put scord + the
+    // out_sc register into a block RAM; BRAM clock-to-out then drove the
+    // H-store read and the equalizer's DSP inputs in one cycle and failed
+    // timing (-0.452 ns, 153 endpoints, step 3c). These are 256 x 2 and
+    // 256 x 8 -- a few LUTs -- and out_sc must leave a plain flip-flop,
+    // like the old d_rd counter did.
+    (* rom_style = "distributed" *) reg [1:0] sctype [0:N_FFT-1];
+    (* rom_style = "distributed" *) reg [7:0] scord  [0:N_FFT-1];
     initial $readmemh(`GRID_TYPE_MEM, sctype);
     initial $readmemh(`GRID_ORD_MEM,  scord);
 

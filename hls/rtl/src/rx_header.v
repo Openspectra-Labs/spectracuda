@@ -39,7 +39,12 @@ module rx_header (
     output wire [2:0]  crc_code,
 
     output reg  [1:0]  dm_scheme,
-    output reg  [7:0]  n_pay_sym
+    output reg  [7:0]  n_pay_sym,
+    // STEP-3 TEMPORARY (rx_top's C1 adapter): high once this frame's header
+    // is decoded AND n_pay_sym has finished accumulating, i.e. every field
+    // is final. Not hdr_done -- n_pay_sym is still counting then.
+    // Replaced by rx_bit_domain's config publisher in step 4.
+    output wire        cfg_final
 );
     localparam integer N_DATA = `N_DATA;
 
@@ -103,4 +108,10 @@ module rx_header (
             end
         end
     end
+    reg hdr_seen;
+    always @(posedge clk) begin
+        if (rst || frame_start) hdr_seen <= 1'b0;
+        else if (hdr_done)      hdr_seen <= 1'b1;
+    end
+    assign cfg_final = hdr_seen && !counting;
 endmodule

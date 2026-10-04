@@ -13,15 +13,13 @@
 //           llr[i >= n] = 0
 //   c1.txt  config the header produced (one "key value" per line)
 //
-// THESE TAPS READ PRE-REFACTOR INTERNALS by hierarchical path (u_td,
-// u_fd, u_hd, u_bd). They are the bridge from the old RTL to the new
-// boundaries and only compile against that hierarchy -- the dumps are
-// what the refactored stages are checked against, so they are captured
-// once (capture_golden.sh) and committed. Do not expect this file to
-// build after the refactor.
-//
-// sym_idx / fseq / bin / sc are DERIVED here from the old RTL's markers;
-// the old RTL does not carry them. sym_idx 0 = the first training symbol.
+// SINCE STEP 3c the taps read the stage BUSES in rx_top, not internals:
+//   I1 = what rx_freq_domain receives (in_* port connections: the old
+//        TD's FFT output plus adapter A's sym_idx / fseq);
+//   I2 = every transfer ACCEPTED on rx_freq_domain's out_* port.
+// So check_golden.sh compares the new FD's real interfaces against the
+// pre-refactor reference. c1 still reads the legacy header block (u_hd)
+// until step 4 replaces it.
 // ============================================================
 
     // stype codes: rx_if.vh (frozen). The old 2-bit tag uses the same
@@ -52,42 +50,19 @@
             cap_psym = 0;
         end
 
-        // ---- I1: FFT output ----
-        if (dut.fft_valid) begin
-            if (dut.fft_sof) begin
-                cap_bin = 0;
-                cap_sym = cap_sym + 1;
-            end
-            $fwrite(cap_i1, "%0d %0d %0d %0d %0d %0d\n", cap_fseq, cap_sym,
-                    cap_bin, dut.fft_stype, $signed(dut.fft_re), $signed(dut.fft_im));
-            cap_bin = cap_bin + 1;
-        end
+        // ---- I1: the TD -> FD bus ----
+        if (dut.fft_valid)
+            $fwrite(cap_i1, "%0d %0d %0d %0d %0d %0d\n", dut.i1_fseq, dut.i1_sym,
+                    dut.fft_bin, dut.fft_stype, $signed(dut.fft_re), $signed(dut.fft_im));
 
-        // ---- I2, header: one BPSK bit per data subcarrier ----
-        if (dut.u_fd.hdr_valid_bit) begin
-            $fwrite(cap_i2, "%0d %0d %0d %0d 1 %0d 0 0 0 0 0\n", cap_fseq,
-                    `N_TRAINING, cap_hsc, CAP_ST_HEADER,
-                    dut.u_fd.hdr_bit ? -1 : 0);
-            cap_hsc = cap_hsc + 1;
-        end
-
-        // ---- I2, payload: demapper output, bits[5] is the first bit ----
-        if (dut.u_bd.dm_valid) begin
+        // ---- I2: accepted FD -> BIT transfers (LLR_W = 1: 0 or -1) ----
+        if (dut.fd_out_valid && dut.fd_out_ready)
             $fwrite(cap_i2, "%0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d\n",
-                    cap_fseq, `N_TRAINING + 1 + cap_psym, cap_psc, CAP_ST_DATA,
-                    dut.u_bd.dm_nbits,
-                    (dut.u_bd.dm_nbits > 0 && dut.u_bd.dm_bits[5]) ? -1 : 0,
-                    (dut.u_bd.dm_nbits > 1 && dut.u_bd.dm_bits[4]) ? -1 : 0,
-                    (dut.u_bd.dm_nbits > 2 && dut.u_bd.dm_bits[3]) ? -1 : 0,
-                    (dut.u_bd.dm_nbits > 3 && dut.u_bd.dm_bits[2]) ? -1 : 0,
-                    (dut.u_bd.dm_nbits > 4 && dut.u_bd.dm_bits[1]) ? -1 : 0,
-                    (dut.u_bd.dm_nbits > 5 && dut.u_bd.dm_bits[0]) ? -1 : 0);
-            if (cap_psc == `N_DATA - 1) begin
-                cap_psc  = 0;
-                cap_psym = cap_psym + 1;
-            end else
-                cap_psc = cap_psc + 1;
-        end
+                    dut.fd_out_fseq, dut.fd_out_sym_idx, dut.fd_out_sc,
+                    dut.fd_out_stype, dut.fd_out_n,
+                    dut.fd_out_llr[0] ? -1 : 0, dut.fd_out_llr[1] ? -1 : 0,
+                    dut.fd_out_llr[2] ? -1 : 0, dut.fd_out_llr[3] ? -1 : 0,
+                    dut.fd_out_llr[4] ? -1 : 0, dut.fd_out_llr[5] ? -1 : 0);
     end
 
     // ---- C1: what the header produced, once per run ----
