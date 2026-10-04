@@ -42,7 +42,7 @@ SRCS = ["tb/rx_top_dbg.v", "src/rx_top.v", "src/rx_time_domain.v", "src/rx_freq_
         "src/cfo_estimate.v", "src/cfo_correct.v", "src/cordic_rot.v",
         "src/cordic_vec.v", "src/cp_fft.v", "src/grid_extract.v",
         "src/ls_chanest.v", "src/mmse_eq.v", "src/pilot_cpe.v",
-        "src/header_decode.v", "src/demapper.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v",
+        "src/header_decode.v", "src/demapper.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v", "src/viterbi_dec_soft.v",
         "src/deinterleaver.v", "tb/stubs/xfft_256.v"]
 
 

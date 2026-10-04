@@ -19,7 +19,7 @@ synth_ip [get_ips xfft_256]
 foreach f {rx_top rx_time_domain rx_freq_domain sync_fifo_fwft rx_bit_domain
            sc_sync_rtl frame_sync cfo_estimate cfo_correct
            cordic_rot cordic_vec cp_fft grid_extract ls_chanest
-           mmse_eq pilot_cpe header_decode demapper viterbi_dec viterbi_dec_ovl viterbi_dec_ovl
+           mmse_eq pilot_cpe header_decode demapper viterbi_dec viterbi_dec_ovl viterbi_dec_soft viterbi_dec_ovl
            deinterleaver} {
     add_files "$root/src/$f.v"
 }

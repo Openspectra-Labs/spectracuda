@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GOLD = os.path.join(HERE, "golden_if")
 N_DATA = 216
 SRCS = ["tb/rx_bit_domain_tb.v", "src/rx_bit_domain.v", "src/sync_fifo_fwft.v",
-        "src/header_decode.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v", "src/deinterleaver.v"]
+        "src/header_decode.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v", "src/viterbi_dec_soft.v", "src/deinterleaver.v"]
 
 
 def rows(path):
@@ -64,11 +64,14 @@ def write(path, rr):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--llr-w", type=int, default=1,
+                    help="4 = soft bit domain fed the reference as +/-7 LLRs")
     a = ap.parse_args()
     wdir = os.path.join(HERE, "build", f"bd_stage_{os.getpid()}_{uuid.uuid4().hex[:8]}")
     os.makedirs(wdir)
     r = subprocess.run(["verilator", "--binary", "--timing", "-Wno-WIDTHEXPAND",
                         "-Wno-WIDTHTRUNC", "-Isrc/generated", "-Isrc", "-I.",
+                        f"-DTB_LLR_W={a.llr_w}",
                         "--top-module", "rx_bit_domain_tb", "-o", "bd_tb",
                         "--Mdir", os.path.join(wdir, "vsim")] + SRCS,
                        cwd=HERE, capture_output=True, text=True)

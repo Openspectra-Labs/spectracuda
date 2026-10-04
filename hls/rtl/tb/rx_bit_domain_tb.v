@@ -21,7 +21,13 @@
 `timescale 1ns / 1ps
 
 module rx_bit_domain_tb;
-    localparam integer LLR_W = 1;
+`ifndef TB_LLR_W
+`define TB_LLR_W 1
+`endif
+    // LLR_W = 4: the reference's hard bits are fed as +/-7 LLRs. With equal
+    // magnitudes the soft metric is an order-preserving affine map of the
+    // hard one, so the bytes must equal the hard reference exactly.
+    localparam integer LLR_W = `TB_LLR_W;
     localparam integer MAXI  = 65536;
     localparam integer MAXO  = 16384;
 
@@ -30,7 +36,7 @@ module rx_bit_domain_tb;
 
     reg         in_valid = 0;
     wire        in_ready;
-    reg  [5:0]  in_llr = 0;
+    reg  [6*LLR_W-1:0] in_llr = 0;
     reg  [2:0]  in_n = 0, in_stype = 0;
     reg  [7:0]  in_sc = 0, in_sym = 0;
     reg  [1:0]  in_fseq = 0;
@@ -203,7 +209,13 @@ module rx_bit_domain_tb;
         begin
             in_fseq = i_fq[k]; in_sym = i_sym[k]; in_sc = i_sc[k]; in_stype = i_st[k];
             in_n = i_n[k];
-            in_llr = (i_st[k] == 1 && corrupt) ? ~i_llr[k] & 6'b000001 : i_llr[k];
+            begin : mk_llr
+                integer b; reg [5:0] hb;
+                hb = (i_st[k] == 1 && corrupt) ? ~i_llr[k] & 6'b000001 : i_llr[k];
+                for (b = 0; b < 6; b = b + 1)
+                    if (LLR_W == 1) in_llr[b] = hb[b];
+                    else            in_llr[b*LLR_W +: LLR_W] = (b < i_n[k]) ? (hb[b] ? -7 : 7) : 0;
+            end
             {in_ss, in_se, in_fs, in_fe} = i_mk[k];
         end
     endtask
@@ -232,7 +244,7 @@ module rx_bit_domain_tb;
         if (dut.vit_done) $display("DBG %0d vit_done", cyc);
         if (out_valid && out_last) $display("DBG %0d out_last", cyc);
         if (dut.cb_hv && dut.h_first && dut.sub == 0 && dut.busy && (cyc % 50000 == 0))
-            $display("DBG %0d first entry waiting: busy=%0d vit_running=%0d", cyc, dut.busy, dut.u_vit.running);
+            $display("DBG %0d first entry waiting: busy=%0d vit_running=%0d", cyc, dut.busy, dut.frame_done);
         if (dut.acc_dat && dut.in_first) $display("DBG %0d first DATA accepted fq=%0d", cyc, in_fseq);
     end
 

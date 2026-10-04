@@ -190,15 +190,12 @@ module rx_bit_domain #(
     end
     wire in_first = acc_dat && !in_seen_data;
 
-    // hard bits MSB-first (llr[0] = first bit -> bits[5]); n coded 2 bits:
-    // n = 2/4/6 -> 1/2/3 (n/2). BPSK never reaches this path.
-    wire [5:0] in_bits;
-    genvar gk;
-    generate for (gk = 0; gk < 6; gk = gk + 1) begin : g_bits
-        assign in_bits[5-gk] = in_llr[gk*LLR_W + LLR_W-1];
-    end endgenerate
-
-    localparam integer CB_W = 1 + 2 + 6;
+    // An entry is the LLR group as delivered, llr[k] at [k*LLR_W +: LLR_W]
+    // (k = 0 first in transmission order), plus n coded in 2 bits
+    // (n = 2/4/6 -> 1/2/3 = symbol pairs) and the frame-first flag.
+    // LLR_W = 1 (hard): 9 bits, the BRAM 4K x 9 shape. LLR_W = 4 (soft):
+    // 27 bits. BPSK (header) never reaches this path.
+    localparam integer CB_W = 1 + 2 + 6 * LLR_W;
     wire            cb_hv, cb_full;
     wire [CB_W-1:0] cb_head;
     wire            cb_pop;
@@ -206,7 +203,7 @@ module rx_bit_domain #(
 
     sync_fifo_fwft #(.WIDTH(CB_W), .DEPTH(CB_DEPTH)) u_cb (
         .clk(clk), .rst(rst),
-        .push(acc_dat), .push_data({in_first, in_n[2:1], in_bits}),
+        .push(acc_dat), .push_data({in_first, in_n[2:1], in_llr}),
         .head_valid(cb_hv), .head_data(cb_head), .pop(cb_pop),
         .level(cb_level), .full(cb_full), .overflow(st_cb_overflow), .underflow());
 
@@ -230,12 +227,12 @@ module rx_bit_domain #(
     // =================================================================
     // Unpack into the Viterbi (skid-buffered, as the old bit decoder)
     // =================================================================
-    wire       h_first = cb_head[8];
-    wire [1:0] h_half  = cb_head[7:6];     // n / 2: symbols in this entry
-    wire [5:0] h_bits  = cb_head[5:0];
+    wire       h_first = cb_head[CB_W-1];
+    wire [1:0] h_half  = cb_head[CB_W-2:CB_W-3];   // n / 2: pairs in this entry
+    wire [6*LLR_W-1:0] h_llr = cb_head[6*LLR_W-1:0];
 
     reg  [2:0] sub;                        // symbol index within the entry
-    reg  [1:0] sym_q;
+    reg  [2*LLR_W-1:0] sym_q;           // {l1, l0}, l0 = first bit of the pair
     reg        sym_valid_q;
     reg        busy;                       // a frame is in Viterbi/deinterleaver
     wire       vit_ready;
@@ -259,14 +256,21 @@ module rx_bit_domain #(
     assign     cb_pop   = drop || (issue && last_sub);
     assign     fq_pop   = f_start;
 
-    // bits leave MSB-first; viterbi_dec takes sym[0] = first bit of the pair
-    wire [2:0] hi      = 3'd5 - {sub[1:0], 1'b0};
-    wire [1:0] sym_now = {h_bits[hi - 3'd1], h_bits[hi]};
+    // pair `sub` of the entry: {llr[2*sub+1], llr[2*sub]}; the decoders take
+    // sym[LLR_W-1:0] = the pair's FIRST coded bit
+    reg  [2*LLR_W-1:0] sym_now;
+    always @* begin
+        case (sub[1:0])
+            2'd0:    sym_now = h_llr[0*LLR_W +: 2*LLR_W];
+            2'd1:    sym_now = h_llr[2*LLR_W +: 2*LLR_W];
+            default: sym_now = h_llr[4*LLR_W +: 2*LLR_W];
+        endcase
+    end
 
     wire vit_last;
     always @(posedge clk) begin
         if (rst) begin
-            sub <= 3'd0; sym_q <= 2'd0; sym_valid_q <= 1'b0; pushed_all <= 1'b0;
+            sub <= 3'd0; sym_q <= 0; sym_valid_q <= 1'b0; pushed_all <= 1'b0;
         end else begin
             if (drop)       sub <= 3'd0;
             else if (issue) sub <= last_sub ? 3'd0 : sub + 3'd1;
@@ -294,12 +298,22 @@ module rx_bit_domain #(
     assign vit_last = vit_push && (push_cnt == n_sym_total - 16'd1);
 
     // Overlapped decoder: ACS never pauses for traceback, ~0.96 decoded
-    // bits/clock (was 0.246 with viterbi_dec). Same ports, same windows.
-    viterbi_dec_ovl u_vit (
-        .clk(clk), .rst(rst), .start(f_start),
-        .sym(sym_q), .in_valid(vit_push), .in_ready(vit_ready),
-        .last(vit_last),
-        .out_bit(vit_bit), .out_valid(vit_valid), .frame_done(vit_done));
+    // bits/clock. Hard (LLR_W = 1) or soft (LLR_W > 1: signed LLRs,
+    // modulo-10 path metrics -- proven, see viterbi_dec_soft.v), same
+    // windows and handshake either way.
+    generate if (LLR_W == 1) begin : g_hard
+        viterbi_dec_ovl u_vit (
+            .clk(clk), .rst(rst), .start(f_start),
+            .sym(sym_q), .in_valid(vit_push), .in_ready(vit_ready),
+            .last(vit_last),
+            .out_bit(vit_bit), .out_valid(vit_valid), .frame_done(vit_done));
+    end else begin : g_soft
+        viterbi_dec_soft #(.SYM_W(LLR_W), .PM_W(10), .NORM(0), .OPT(1)) u_vit (
+            .clk(clk), .rst(rst), .start(f_start),
+            .sym(sym_q), .in_valid(vit_push), .in_ready(vit_ready),
+            .last(vit_last),
+            .out_bit(vit_bit), .out_valid(vit_valid), .frame_done(vit_done));
+    end endgenerate
     assign frame_done = vit_done;
 
     // =================================================================
