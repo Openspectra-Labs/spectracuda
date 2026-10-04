@@ -5,16 +5,15 @@ read, post-synth FIFO max-delay). XC7A50T-1, OOC, Vivado 2025.2, real xfft.
 
 | Block | LUT | FF | BRAM | DSP |
 |---|---:|---:|---:|---:|
-| TX total | 4446 (13.6%) | 4575 (7.0%) | 5 tiles (2 RAMB36 + 6 RAMB18) | 9 |
-| BIT | 643 | 477 | 2 RAMB36 | 0 |
-| CDC | 66 | 83 | 0 | 0 |
-| FD | 585 | 119 | 1 RAMB18 | 0 |
-| TD incl. IFFT | 3155 | 3892 | 5 RAMB18 | 9 |
+| TX total | 4391 (13.5%) | 4637 (7.1%) | 5 tiles (2 RAMB36 + 6 RAMB18) | 9 |
 
-Routed setup/hold: clk_bit 125 MHz +0.372/+0.040 ns; clk_sample 100 MHz
-+0.035/+0.046 ns (worst: xfft output -> /128 round -> clamp -> timemem write,
-12 levels; one register on the IFFT output would add margin). FIFO crossing
-clk_bit->clk_sample: 38 endpoints, +6.375 ns, report_cdc 0 unsafe.
+Routed setup/hold: clk_bit 125 MHz +0.656/+0.052 ns; clk_sample 100 MHz
++0.354/+0.027 ns. The IFFT output is registered before the /128 round, clamp
+and timemem write (that path was +0.035 ns at 12 levels); rounding is one
+adder, exhaustively identical to the old two-negation form over all 2^25
+inputs. Worst clk_sample path is now internal to the xfft core (0 levels).
+FIFO crossing clk_bit->clk_sample: 38 endpoints, +6.498 ns, report_cdc 0
+unsafe.
 
 Verification on this RTL: real-xfft netlist xsim (run_top_xsim.sh) 3/3 at
 40 MSPS incl. forced underrun and bad-symbol recovery, within 1 LSB on 15648

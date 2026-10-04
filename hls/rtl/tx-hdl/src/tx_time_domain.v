@@ -46,12 +46,16 @@ module tx_time_domain #(parameter PREAMBLE_FILE="reference/preamble.mem")(
  // Q14 -> Q15: net /128. Clamp final sample, no wraparound.
  function signed [25:0] rounded(input signed [24:0] x);
    reg signed[25:0] ext;
-   begin ext={x[24],x}; rounded=ext>=0 ? ((ext+26'sd64)>>>7) : -(((-ext)+26'sd64)>>>7);end
+   // ties away from zero in ONE adder: x<0 -> -floor((-x+64)/128) == (x+63)>>>7
+   begin ext={x[24],x}; rounded=(ext+(ext[25] ? 26'sd63 : 26'sd64))>>>7;end
  endfunction
  function [15:0] clamp(input signed[25:0] x);
    begin clamp=x>32767 ? 16'h7fff : (x < -32768 ? 16'h8000 : x[15:0]);end
  endfunction
- wire signed[25:0] ri=rounded(mre),rq=rounded(mim);
+ // IFFT output is registered (stage p*) before round/clamp/timemem write:
+ // the single-cycle xfft->round->clamp->RAM path had 12 logic levels.
+ reg pv,plast;reg [1:0] pbank;reg [7:0] pidx;reg signed[24:0] pre,pim;
+ wire signed[25:0] ri=rounded(pre),rq=rounded(pim);
  wire seq_err=in_bin!=expect_bin || (in_frame_end&&in_bin!=255) ||
      (in_bin!=0&&(ffq[fw]!=in_fseq||fsym[fw]!=in_sym_idx||fst[fw]!=in_stype||in_frame_start));
  wire mready=treserved[mw]&&!tfull[mw];
@@ -65,7 +69,7 @@ module tx_time_domain #(parameter PREAMBLE_FILE="reference/preamble.mem")(
  always @(posedge clk) begin
    if(rst) begin
      fw<=0;fr<=0;tw<=0;tr<=0;mw<=0;ffull<=0;treserved<=0;tfull<=0;
-     feeding<=0;svalid<=0;feed_count<=0;sample_input<=0;mindex<=0;expect_bin<=0;
+     feeding<=0;svalid<=0;pv<=0;plast<=0;pbank<=0;pidx<=0;pre<=0;pim<=0;feed_count<=0;sample_input<=0;mindex<=0;expect_bin<=0;
      txstate<=WAIT_FRAME;sample_index<=0;out_valid<=0;out_i<=0;out_q<=0;
      out_active<=0;out_frame_start<=0;out_frame_end<=0;out_fseq<=0;
      st_sequence_error<=0;st_underrun<=0;st_clipped<=0;st_abort_count<=0;
@@ -97,12 +101,17 @@ module tx_time_domain #(parameter PREAMBLE_FILE="reference/preamble.mem")(
          svalid<=0;feeding<=0;ffull[fr]<=0;fr<=!fr;
        end
      end
+     pv<=mvalid&&mready;
      if(mvalid&&mready) begin
-       timemem[{mw,mindex}]<={clamp(ri),clamp(rq)};
-       if(ri>32767||ri < -32768||rq>32767||rq < -32768) st_clipped<=1;
-       if(mlast!=(mindex==255)) st_sequence_error<=1;
-       if(mindex==255) begin tfull[mw]<=1;mw<=inc3(mw);end
+       pre<=mre;pim<=mim;plast<=mlast;pidx<=mindex;pbank<=mw;
+       if(mindex==255) mw<=inc3(mw);
        mindex<=mindex+1;
+     end
+     if(pv) begin
+       timemem[{pbank,pidx}]<={clamp(ri),clamp(rq)};
+       if(ri>32767||ri < -32768||rq>32767||rq < -32768) st_clipped<=1;
+       if(plast!=(pidx==255)) st_sequence_error<=1;
+       if(pidx==255) tfull[pbank]<=1;
      end
      // Drain: retire the cut frame's remaining symbols without sending them
      // (clock rate, not sample rate). A frame-start symbol ends the drain.
