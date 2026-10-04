@@ -22,12 +22,19 @@ puts $fh "create_clock -name clk -period $period \[get_ports clk\]"
 close $fh
 read_xdc $xdc
 set_property top $top [current_fileset]
-synth_design -top $top -part $part -mode out_of_context
+# Optional parameter overrides and report tag, from the environment:
+#   GENERICS="PM_W=10 NORM=0"   TAG=soft_mod10
+set gen {}
+if {[info exists ::env(GENERICS)] && $::env(GENERICS) ne ""} {
+    foreach g $::env(GENERICS) { lappend gen -generic $g }
+}
+synth_design -top $top -part $part -mode out_of_context {*}$gen
 opt_design
 place_design
 phys_opt_design
 route_design
 set tag "${top}_${period}ns"
+if {[info exists ::env(TAG)] && $::env(TAG) ne ""} { set tag "${top}_$::env(TAG)_${period}ns" }
 report_timing_summary -max_paths 20 -file "$root/build/${tag}_timing.txt"
 # one line per failing endpoint (worst path to each), to see WHAT fails
 report_timing -max_paths 5000 -nworst 1 -slack_lesser_than 0 -path_type summary \
