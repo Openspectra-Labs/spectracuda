@@ -46,7 +46,10 @@
 module rx_bit_domain #(
     parameter integer LLR_W           = 1,
     parameter integer MAX_PAYLOAD_SYM = 128,
-    parameter integer CB_DEPTH        = MAX_PAYLOAD_SYM * `N_DATA
+    parameter integer CB_DEPTH        = MAX_PAYLOAD_SYM * `N_DATA,
+    // 1 = inner frequency de-interleaver (spectracuda interleaver2) before
+    // the Viterbi; 0 = off (the frame format the RTL is pinned to today)
+    parameter integer IL2             = 0
 )(
     input  wire                     clk,
     input  wire                     rst,
@@ -219,6 +222,21 @@ module rx_bit_domain #(
 
     assign in_ready = !cb_full;
 
+    // ---- optional inner de-interleaver between the FIFO and the unpack ----
+    // u_*: the entry stream the unpack consumes (a subcarrier per entry
+    // without IL2; one de-interleaved pair per entry with it).
+    wire            u_hv;
+    wire [CB_W-1:0] u_head;
+    wire            u_pop;
+    generate if (IL2 != 0) begin : g_il2
+        il2_deint #(.LLR_W(LLR_W), .N_DATA(N_DATA)) u_il2 (
+            .clk(clk), .rst(rst),
+            .in_hv(cb_hv), .in_head(cb_head), .in_pop(cb_pop),
+            .out_hv(u_hv), .out_head(u_head), .out_pop(u_pop));
+    end else begin : g_no_il2
+        assign u_hv = cb_hv; assign u_head = cb_head; assign cb_pop = u_pop;
+    end endgenerate
+
     always @(posedge clk) begin
         if (rst) st_cb_hwm <= 0;
         else if (cb_level > st_cb_hwm) st_cb_hwm <= cb_level;
@@ -227,9 +245,9 @@ module rx_bit_domain #(
     // =================================================================
     // Unpack into the Viterbi (skid-buffered, as the old bit decoder)
     // =================================================================
-    wire       h_first = cb_head[CB_W-1];
-    wire [1:0] h_half  = cb_head[CB_W-2:CB_W-3];   // n / 2: pairs in this entry
-    wire [6*LLR_W-1:0] h_llr = cb_head[6*LLR_W-1:0];
+    wire       h_first = u_head[CB_W-1];
+    wire [1:0] h_half  = u_head[CB_W-2:CB_W-3];    // n / 2: pairs in this entry
+    wire [6*LLR_W-1:0] h_llr = u_head[6*LLR_W-1:0];
 
     reg  [2:0] sub;                        // symbol index within the entry
     reg  [2*LLR_W-1:0] sym_q;           // {l1, l0}, l0 = first bit of the pair
@@ -249,11 +267,11 @@ module rx_bit_domain #(
     // Now: after the last push, the rest of the frame's entries are popped
     // and dropped -- as Python truncates to the encoded length.
     reg        pushed_all;                 // this frame's `last` has gone in
-    wire       drop     = cb_hv && pushed_all && !at_first;
-    wire       issue    = cb_hv && !drop && start_ok && b_drains;
+    wire       drop     = u_hv && pushed_all && !at_first;
+    wire       issue    = u_hv && !drop && start_ok && b_drains;
     wire       f_start  = issue && at_first;
     wire       last_sub = (sub == {1'b0, h_half} - 3'd1);
-    assign     cb_pop   = drop || (issue && last_sub);
+    assign     u_pop    = drop || (issue && last_sub);
     assign     fq_pop   = f_start;
 
     // pair `sub` of the entry: {llr[2*sub+1], llr[2*sub]}; the decoders take

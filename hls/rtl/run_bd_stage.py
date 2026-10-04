@@ -29,13 +29,42 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 GOLD = os.path.join(HERE, "golden_if")
 N_DATA = 216
-SRCS = ["tb/rx_bit_domain_tb.v", "src/rx_bit_domain.v", "src/sync_fifo_fwft.v",
+SRCS = ["tb/rx_bit_domain_tb.v", "src/rx_bit_domain.v", "src/il2_deint.v", "src/sync_fifo_fwft.v",
         "src/header_decode.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v", "src/viterbi_dec_soft.v", "src/deinterleaver.v"]
 
 
 def rows(path):
     with open(path) as f:
         return [list(map(int, l.split())) for l in f if l.strip()]
+
+
+def il2_perm(n):
+    """spectracuda BlockInterleaver(n_bits=n, unit_bits=1): out[i] = in[perm[i]]."""
+    import math
+    M = 1 + math.isqrt(n)
+    N = -(-n // M)
+    order = [r * N + c for c in range(N) for r in range(M)]
+    return [x for x in order if x < n]
+
+
+def interleave_data_symbols(items):
+    """Apply interleaver2's ENCODE to every DATA symbol's coded bits."""
+    out, k = [], 0
+    while k < len(items):
+        r = items[k]
+        if r[3] != 3:
+            out.append(r); k += 1; continue
+        sym = items[k:k + N_DATA]
+        bps = sym[0][4]
+        bits = [x[5 + b] for x in sym for b in range(bps)]
+        perm = il2_perm(len(bits))
+        il = [bits[p] for p in perm]
+        for g, x in enumerate(sym):
+            y = list(x)
+            y[5:5 + bps] = il[g * bps:(g + 1) * bps]
+            out.append(y)
+        k += N_DATA
+    return out
 
 
 def frame(case, fseq):
@@ -64,6 +93,9 @@ def write(path, rr):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--il2", action="store_true",
+                    help="interleave each data symbol with interleaver2's exact "
+                         "permutation and run the bit domain with IL2=1")
     ap.add_argument("--llr-w", type=int, default=1,
                     help="4 = soft bit domain fed the reference as +/-7 LLRs")
     a = ap.parse_args()
@@ -71,7 +103,7 @@ def main():
     os.makedirs(wdir)
     r = subprocess.run(["verilator", "--binary", "--timing", "-Wno-WIDTHEXPAND",
                         "-Wno-WIDTHTRUNC", "-Isrc/generated", "-Isrc", "-I.",
-                        f"-DTB_LLR_W={a.llr_w}",
+                        f"-DTB_LLR_W={a.llr_w}", f"-DTB_IL2={int(a.il2)}",
                         "--top-module", "rx_bit_domain_tb", "-o", "bd_tb",
                         "--Mdir", os.path.join(wdir, "vsim")] + SRCS,
                        cwd=HERE, capture_output=True, text=True)
@@ -103,6 +135,8 @@ def main():
             out, cfgs = [], [[0, 0, 1, 0, 0, 0, 0, 0, 0]]
         else:
             cfgs = [cfg]
+        if a.il2:
+            items = interleave_data_symbols(items)
         tag = f"{case} C={c} {mode}"
         base = os.path.join(wdir, f"t{abs(hash(tag))}")
         write(base + ".i2", items); write(base + ".o1", out); write(base + ".c1", cfgs)

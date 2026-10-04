@@ -28,6 +28,9 @@ module rx_bit_domain_tb;
     // magnitudes the soft metric is an order-preserving affine map of the
     // hard one, so the bytes must equal the hard reference exactly.
     localparam integer LLR_W = `TB_LLR_W;
+`ifndef TB_IL2
+`define TB_IL2 0
+`endif
     localparam integer MAXI  = 65536;
     localparam integer MAXO  = 16384;
 
@@ -58,7 +61,7 @@ module rx_bit_domain_tb;
     wire        cb_ovf, unit_col, seq_err;
     wire [15:0] cb_hwm;
 
-    rx_bit_domain #(.LLR_W(LLR_W)) dut (
+    rx_bit_domain #(.LLR_W(LLR_W), .IL2(`TB_IL2)) dut (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in_ready(in_ready), .in_llr(in_llr), .in_n(in_n),
         .in_sc(in_sc), .in_sym_idx(in_sym), .in_stype(in_stype), .in_fseq(in_fseq),
