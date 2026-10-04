@@ -232,7 +232,7 @@ module rx_bit_domain_tb;
         if (dut.vit_done) $display("DBG %0d vit_done", cyc);
         if (out_valid && out_last) $display("DBG %0d out_last", cyc);
         if (dut.cb_hv && dut.h_first && dut.sub == 0 && dut.busy && (cyc % 50000 == 0))
-            $display("DBG %0d first entry waiting: busy=%0d vit_state=%0d", cyc, dut.busy, dut.u_vit.state);
+            $display("DBG %0d first entry waiting: busy=%0d vit_running=%0d", cyc, dut.busy, dut.u_vit.running);
         if (dut.acc_dat && dut.in_first) $display("DBG %0d first DATA accepted fq=%0d", cyc, in_fseq);
     end
 

@@ -293,7 +293,9 @@ module rx_bit_domain #(
     end
     assign vit_last = vit_push && (push_cnt == n_sym_total - 16'd1);
 
-    viterbi_dec u_vit (
+    // Overlapped decoder: ACS never pauses for traceback, ~0.96 decoded
+    // bits/clock (was 0.246 with viterbi_dec). Same ports, same windows.
+    viterbi_dec_ovl u_vit (
         .clk(clk), .rst(rst), .start(f_start),
         .sym(sym_q), .in_valid(vit_push), .in_ready(vit_ready),
         .last(vit_last),

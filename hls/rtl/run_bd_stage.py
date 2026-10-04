@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GOLD = os.path.join(HERE, "golden_if")
 N_DATA = 216
 SRCS = ["tb/rx_bit_domain_tb.v", "src/rx_bit_domain.v", "src/sync_fifo_fwft.v",
-        "src/header_decode.v", "src/viterbi_dec.v", "src/deinterleaver.v"]
+        "src/header_decode.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v", "src/deinterleaver.v"]
 
 
 def rows(path):
