@@ -27,18 +27,18 @@ module rx_top_dbg;
         if (dut.u_td.fft_valid)   n_fft = n_fft + 1;
         if (dut.u_fd.gd_valid)    n_gd  = n_gd + 1;
         if (dut.u_fd.ch_valid)     n_ce  = n_ce + 1;
-        if (dut.b_hdr) n_hv = n_hv + 1;
+        if ((dut.fd_out_valid && dut.fd_out_stype == 3'd1)) n_hv = n_hv + 1;
         if (dut.u_fd.eqd_valid)   n_eqd = n_eqd + 1;
         if (dut.u_fd.cpe_ov) n_cpe = n_cpe + 1;
-        if (dut.b_dat)    n_dm  = n_dm + 1;
+        if ((dut.fd_out_valid && dut.fd_out_stype == 3'd3))    n_dm  = n_dm + 1;
         if (out_unit_valid) $fwrite(fu, "%0d\n", ounit);
         if (dut.u_fd.eqd_valid && (dut.u_fd.ed_st == 3'd3)) $fwrite(fe, "%0d %0d\n", $signed(dut.u_fd.eqd_re), $signed(dut.u_fd.eqd_im));
         if (dut.u_fd.cpe_ov) $fwrite(fq, "%0d %0d\n", $signed(dut.u_fd.cpe_re), $signed(dut.u_fd.cpe_im));
         if (dut.u_bd.vit_push)    n_push = n_push + 1;
         if (dut.u_bd.vit_valid)   n_vit = n_vit + 1;
-        if (dut.u_bd.di_valid)    n_di  = n_di + 1;
+        if (dut.u_bd.di_pend)    n_di  = n_di + 1;
         if (dut.u_bd.vit_ready)   n_rdy = n_rdy + 1;
-        if (dut.u_hd.hdr_done)    n_hdone = n_hdone + 1;
+        if (dut.u_bd.hd_done)    n_hdone = n_hdone + 1;
     end
     initial begin
         n_det=0;n_fsv=0;n_cor=0;n_fft=0;n_gd=0;n_hv=0;n_ce=0;n_eqd=0;n_cpe=0;n_dm=0;
@@ -58,7 +58,7 @@ module rx_top_dbg;
         $display("det=%0d fft=%0d grid_d=%0d ce=%0d hdrbit=%0d eqd=%0d cpe=%0d dm=%0d",
                  n_det, n_fft, n_gd, n_ce, n_hv, n_eqd, n_cpe, n_dm);
         $display("hdr_done=%0d fifo_wr=%0d fifo_rd=%0d push=%0d vit_rdy=%0d vit_out=%0d di_in=%0d n_pay=%0d",
-                 n_hdone, dut.u_bd.f_wr, dut.u_bd.f_rd, n_push, n_rdy, n_vit, n_di, dut.u_hd.n_pay_sym);
+                 n_hdone, dut.u_bd.cb_level, dut.u_bd.cb_level, n_push, n_rdy, n_vit, n_di, dut.cfg_body_syms);
         $fclose(fq); $fclose(fe); $fclose(fu);
         $finish;
     end

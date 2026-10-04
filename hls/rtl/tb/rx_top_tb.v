@@ -24,6 +24,8 @@ module rx_top_tb;
     wire [5:0]  fd_err;
     wire [11:0] fd_b1_hwm;
     wire [9:0]  fd_b2_hwm;
+    wire [1:0]  bd_err;
+    wire [15:0] bd_cb_hwm;
     wire [15:0] payload_len_bits;
     wire [7:0]  mod_scheme, out_unit;
     wire [4:0]  fec0_code, fec1_code;
@@ -38,7 +40,8 @@ module rx_top_tb;
         .crc_code(crc_code), .out_unit(out_unit),
         .out_unit_valid(out_unit_valid), .frame_done(frame_done),
         .fifo_overflow(fifo_ovf),
-        .fd_err(fd_err), .fd_b1_hwm(fd_b1_hwm), .fd_b2_hwm(fd_b2_hwm));
+        .fd_err(fd_err), .fd_b1_hwm(fd_b1_hwm), .fd_b2_hwm(fd_b2_hwm),
+        .bd_err(bd_err), .bd_cb_hwm(bd_cb_hwm));
 
     // Optional I1 dump (FFT output, one bin per line) for the
     // rate-invariance check: the same frame must give identical bins at
@@ -108,6 +111,8 @@ module rx_top_tb;
         $fwrite(fu, "OVF %0d\n", fifo_ovf);
         // frequency-domain stage status: error flags, B1 / B2 high-water
         $fwrite(fu, "FD %0d %0d %0d\n", fd_err, fd_b1_hwm, fd_b2_hwm);
+        // bit-domain status: error flags, coded-bit FIFO high-water
+        $fwrite(fu, "BD %0d %0d\n", bd_err, bd_cb_hwm);
         $fclose(fd); $fclose(fu);
         $display("rx_top_tb: %0d samples, hdr_seen=%0d units=%0d ovf=%0d", NSAMP, hdr_seen, nunits, fifo_ovf);
         $finish;

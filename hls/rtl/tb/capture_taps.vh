@@ -18,8 +18,8 @@
 //        TD's FFT output plus adapter A's sym_idx / fseq);
 //   I2 = every transfer ACCEPTED on rx_freq_domain's out_* port.
 // So check_golden.sh compares the new FD's real interfaces against the
-// pre-refactor reference. c1 still reads the legacy header block (u_hd)
-// until step 4 replaces it.
+// pre-refactor reference. Since step 4b c1 reads the C1 config bus that
+// rx_bit_domain publishes.
 // ============================================================
 
     // stype codes: rx_if.vh (frozen). The old 2-bit tag uses the same
@@ -70,8 +70,8 @@
         begin
             if (!cap_c1_done) begin
                 cap_c1_done = 1'b1;
-                $fwrite(cap_c1, "fseq %0d\n", cap_fseq);
-                $fwrite(cap_c1, "cfg_body_syms %0d\n", dut.u_hd.n_pay_sym);
+                $fwrite(cap_c1, "fseq %0d\n", dut.cfg_fseq);
+                $fwrite(cap_c1, "cfg_body_syms %0d\n", dut.cfg_body_syms);
                 $fwrite(cap_c1, "cfg_mod %0d\n", dut.mod_scheme);
                 $fwrite(cap_c1, "cfg_payload_len_bits %0d\n", dut.payload_len_bits);
                 $fwrite(cap_c1, "cfg_crc %0d\n", dut.crc_code);

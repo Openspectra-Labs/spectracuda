@@ -19,7 +19,7 @@ set_property include_dirs [list "$root/src" "$root/src/generated"] [current_file
 # default and rejects that syntax, so they are marked explicitly.
 # Verilator accepted them without this, which is why it only surfaced
 # at synthesis.
-foreach f [get_files -quiet {*grid_extract.v *header_decode.v *frame_sync.v *pilot_cpe.v *rx_top.v *rx_time_domain.v *rx_freq_domain.v *sync_fifo_fwft.v *rx_header.v *rx_bit_decoder.v}] {
+foreach f [get_files -quiet {*grid_extract.v *header_decode.v *frame_sync.v *pilot_cpe.v *rx_top.v *rx_time_domain.v *rx_freq_domain.v *sync_fifo_fwft.v *rx_bit_domain.v}] {
     set_property file_type SystemVerilog $f
 }
 

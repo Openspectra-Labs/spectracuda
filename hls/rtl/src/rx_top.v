@@ -130,7 +130,10 @@ module rx_top #(
     //              seq_err, b2_overflow, b1_overflow}
     output wire [5:0]                 fd_err,
     output wire [11:0]                fd_b1_hwm,    // B1 high-water, of 1280
-    output wire [9:0]                 fd_b2_hwm     // B2 high-water, of 512
+    output wire [9:0]                 fd_b2_hwm,    // B2 high-water, of 512
+    // Bit-domain status: {seq_err, unit_collision}; coded-bit FIFO high-water
+    output wire [1:0]                 bd_err,
+    output wire [15:0]                bd_cb_hwm
 );
     `include "rx_if.vh"
     localparam integer LLR_W = 1;
@@ -139,9 +142,9 @@ module rx_top #(
     // Stages, wired. Target (step 5): rx_time_domain -> rx_freq_domain
     // -> rx_bit_domain plus the C1 config wires, and nothing else.
     //
-    // Today (step 3c) only the frequency domain is the new IP. The time
-    // domain and the header/bit blocks are still the pre-refactor ones,
-    // joined to it by three TEMPORARY adapters, each marked below.
+    // Since step 4b the frequency and bit domains are the new IP blocks,
+    // wired directly. The time domain is still the pre-refactor one, joined
+    // by the one remaining TEMPORARY adapter (A), removed in step 5.
     // ---------------------------------------------------------------
     wire                     frame_start;
     wire signed [FFT_W-1:0]  fft_re, fft_im;
@@ -149,18 +152,16 @@ module rx_top #(
     wire [1:0]               fft_stype;
     wire [7:0]               fft_bin;
 
-    wire                     hdr_done;
-    wire [3:0]               hdr_bps;
-    wire [7:0]               n_pay_sym;
-    wire                     cfg_final;
+    wire                     td_cfg_valid;
+    wire [7:0]               cfg_body_syms;
 
     rx_time_domain #(.SAMPLE_W(SAMPLE_W), .ACC_W(ACC_W), .FFT_W(FFT_W),
                      .ANGLE_W(ANGLE_W), .BUF_W(BUF_W),
                      .MAX_PAYLOAD_SYM(MAX_PAYLOAD_SYM)) u_td (
         .clk(clk), .rst(rst),
         .in_i(in_i), .in_q(in_q), .in_valid(in_valid),
-        // TEMPORARY until step 4: cfg_valid / n_pay_sym are adapter C's C1.
-        .cfg_body_valid(cfg_valid), .cfg_body_syms(n_pay_sym),
+        // C1 frame length, qualified to TD's own frame by adapter A below.
+        .cfg_body_valid(td_cfg_valid), .cfg_body_syms(cfg_body_syms),
         .frame_start(frame_start),
         .fft_re(fft_re), .fft_im(fft_im), .fft_valid(fft_valid),
         .fft_sof(fft_sof), .fft_stype(fft_stype), .fft_bin(fft_bin));
@@ -168,7 +169,7 @@ module rx_top #(
     // =================================================================
     // TEMPORARY STEP-3 ADAPTER A (old TD -> TD->FD interface)
     // REMOVE IN STEP 5: rx_time_domain will emit sym_idx / fseq /
-    // frame_start itself. Until then they are derived here from the old
+    // frame_start itself, and qualify C1 by its own fseq (td_fseq above). Until then they are derived here from the old
     // FFT markers: a symbol starts on fft_sof, and a frame starts on its
     // TRAIN symbol (N_TRAINING = 1).
     // =================================================================
@@ -189,9 +190,27 @@ module rx_top #(
         end
     end
 
-    // ---- C1 bundle (driven by adapter C below) ----
+    // ---- C1 bundle, from rx_bit_domain ----
     wire       cfg_valid, cfg_err;
     wire [1:0] cfg_fseq;
+    wire [2:0] cfg_mod;
+    wire [7:0] cfg_c2_syms;
+    wire [1:0] cfg_dmrs_period;
+
+    // TD's own frame count, for the C1 qualification below. The old TD has
+    // no fseq; rx_bit_domain holds a bundle until the NEXT frame's replaces
+    // it, so without this the TD could read the previous frame's length.
+    reg  [1:0] td_fseq;
+    reg        td_first;
+    always @(posedge clk) begin
+        if (rst) begin td_fseq <= 2'd0; td_first <= 1'b1; end
+        else if (frame_start) begin
+            td_fseq  <= td_first ? 2'd0 : td_fseq + 2'd1;
+            td_first <= 1'b0;
+        end
+    end
+    assign td_cfg_valid = cfg_valid && (cfg_fseq == td_fseq);
+
 
     // ---- FD -> BIT interface ----
     wire              fd_out_valid, fd_out_ready;
@@ -211,8 +230,8 @@ module rx_top #(
         .in_sym_idx(i1_sym), .in_stype({1'b0, fft_stype}), .in_fseq(i1_fseq),
         .in_frame_start(a_new_frame),
         .cfg_valid(cfg_valid), .cfg_err(cfg_err), .cfg_fseq(cfg_fseq),
-        .cfg_mod(mod_scheme[2:0]), .cfg_body_syms(n_pay_sym),
-        .cfg_c2_syms(8'd0), .cfg_dmrs_period(2'd0),
+        .cfg_mod(cfg_mod), .cfg_body_syms(cfg_body_syms),
+        .cfg_c2_syms(cfg_c2_syms), .cfg_dmrs_period(cfg_dmrs_period),
         .out_valid(fd_out_valid), .out_ready(fd_out_ready), .out_llr(fd_out_llr),
         .out_n(fd_out_n), .out_sc(fd_out_sc), .out_sym_idx(fd_out_sym_idx),
         .out_stype(fd_out_stype), .out_fseq(fd_out_fseq),
@@ -224,54 +243,25 @@ module rx_top #(
         .st_hq_held(), .st_b1_level(), .st_b1_hwm(fd_b1_hwm), .st_b2_hwm(fd_b2_hwm));
 
     // =================================================================
-    // TEMPORARY STEP-3 ADAPTER B (FD->BIT interface -> old header/bit blocks)
-    // REMOVE IN STEP 4: rx_bit_domain takes the FD->BIT interface
-    // directly. The old blocks have no backpressure (the bit FIFO holds a
-    // whole frame), so ready is tied high here.
+    // Bit domain: FD->BIT stream in, C1 out, bytes out.
     // =================================================================
-    assign fd_out_ready = 1'b1;
-    wire   b_hdr = fd_out_valid && (fd_out_stype == ST_HEADER);
-    wire   b_dat = fd_out_valid && (fd_out_stype == ST_DATA);
-    // hard bit k = sign of llr[k]; the old blocks want them MSB-first
-    wire [5:0] b_bits;
-    genvar bk;
-    generate for (bk = 0; bk < 6; bk = bk + 1) begin : g_b
-        assign b_bits[5-bk] = fd_out_llr[bk*LLR_W + LLR_W-1];
-    end endgenerate
-
-    rx_header u_hd (
-        .clk(clk), .rst(rst), .frame_start(frame_start),
-        .hdr_bit(b_bits[5]), .hdr_valid_bit(b_hdr),
-        .hdr_bit_sof(b_hdr && fd_out_frame_start),
-        .cfg_encoded_bits(cfg_encoded_bits),
-        .hdr_valid(hdr_valid), .hdr_done(hdr_done),
-        .payload_len_bits(payload_len_bits), .mod_scheme(mod_scheme),
-        .hdr_bps(hdr_bps), .fec0_code(fec0_code), .fec1_code(fec1_code),
-        .crc_code(crc_code),
-        .dm_scheme(), .n_pay_sym(n_pay_sym), .cfg_final(cfg_final));
-
-    rx_bit_decoder #(.EQ_W(EQ_W), .MAX_PAYLOAD_SYM(MAX_PAYLOAD_SYM)) u_bd (
-        .clk(clk), .rst(rst), .frame_start(frame_start),
-        .dm_bits(b_bits), .dm_nbits({1'b0, fd_out_n}), .dm_valid(b_dat),
-        .hdr_done(hdr_done), .hdr_bps(hdr_bps),
+    rx_bit_domain #(.LLR_W(LLR_W), .MAX_PAYLOAD_SYM(MAX_PAYLOAD_SYM)) u_bd (
+        .clk(clk), .rst(rst),
+        .in_valid(fd_out_valid), .in_ready(fd_out_ready), .in_llr(fd_out_llr),
+        .in_n(fd_out_n), .in_sc(fd_out_sc), .in_sym_idx(fd_out_sym_idx),
+        .in_stype(fd_out_stype), .in_fseq(fd_out_fseq),
+        .in_sym_start(fd_out_sym_start), .in_sym_end(fd_out_sym_end),
+        .in_frame_start(fd_out_frame_start), .in_frame_end(fd_out_frame_end),
         .cfg_encoded_bits(cfg_encoded_bits), .cfg_di_units(cfg_di_units),
         .cfg_di_rows(cfg_di_rows), .cfg_di_cols(cfg_di_cols),
-        .out_unit(out_unit), .out_unit_valid(out_unit_valid),
-        .frame_done(frame_done), .fifo_overflow(fifo_overflow));
-
-    // =================================================================
-    // TEMPORARY STEP-3 ADAPTER C (old header block -> C1 config bundle)
-    // REMOVE IN STEP 4: rx_bit_domain's config publisher drives C1.
-    // cfg_valid only once every field is FINAL (cfg_final: the header is
-    // decoded and n_pay_sym has finished accumulating), tagged with the
-    // fseq of the header those fields came from.
-    // =================================================================
-    reg [1:0] c_fseq;
-    always @(posedge clk) begin
-        if (rst) c_fseq <= 2'd0;
-        else if (b_hdr && fd_out_frame_start) c_fseq <= fd_out_fseq;
-    end
-    assign cfg_valid = cfg_final && hdr_valid;
-    assign cfg_err   = cfg_final && !hdr_valid;
-    assign cfg_fseq  = c_fseq;
+        .cfg_valid(cfg_valid), .cfg_err(cfg_err), .cfg_fseq(cfg_fseq),
+        .cfg_mod(cfg_mod), .cfg_body_syms(cfg_body_syms),
+        .cfg_c2_syms(cfg_c2_syms), .cfg_dmrs_period(cfg_dmrs_period),
+        .hdr_payload_len_bits(payload_len_bits), .hdr_mod_scheme(mod_scheme),
+        .hdr_fec0(fec0_code), .hdr_fec1(fec1_code), .hdr_crc(crc_code),
+        .out_valid(out_unit_valid), .out_byte(out_unit), .out_last(),
+        .out_fseq(), .frame_done(frame_done),
+        .st_cb_overflow(fifo_overflow), .st_unit_collision(bd_err[0]),
+        .st_seq_err(bd_err[1]), .st_cb_hwm(bd_cb_hwm));
+    assign hdr_valid = cfg_valid;
 endmodule

@@ -35,7 +35,7 @@ BUILD = os.path.join(HERE, "build")
 GUARD = 200
 FULL_SCALE = (1 << 15) - 1
 
-SRCS = ["tb/rx_top_tb.v", "src/rx_top.v", "src/rx_time_domain.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v", "src/rx_header.v", "src/rx_bit_decoder.v", "src/sc_sync_rtl.v", "src/frame_sync.v",
+SRCS = ["tb/rx_top_tb.v", "src/rx_top.v", "src/rx_time_domain.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v", "src/rx_bit_domain.v", "src/sc_sync_rtl.v", "src/frame_sync.v",
         "src/cfo_estimate.v", "src/cfo_correct.v", "src/cordic_rot.v",
         "src/cordic_vec.v", "src/cp_fft.v", "src/grid_extract.v",
         "src/ls_chanest.v", "src/mmse_eq.v", "src/pilot_cpe.v",
@@ -245,15 +245,18 @@ def main() -> None:
     raw = [l.split() for l in open(unitp) if l.strip()]
     ovf = None
     fd_err, fd_b1, fd_b2 = None, None, None
+    bd_err, bd_cb = None, None
     vals = []
     for r in raw:
         if r[0] == "OVF":
             ovf = int(r[1])
         elif r[0] == "FD":
             fd_err, fd_b1, fd_b2 = int(r[1]), int(r[2]), int(r[3])
+        elif r[0] == "BD":
+            bd_err, bd_cb = int(r[1]), int(r[2])
         else:
             vals.append(int(r[0]))
-    if ovf is None or fd_err is None:
+    if ovf is None or fd_err is None or bd_err is None:
         raise SystemExit("run_frame: testbench status lines missing -- cannot judge the run")
     rtl_units = np.array(vals, dtype=int)
 
@@ -282,13 +285,15 @@ def main() -> None:
     n = min(len(rtl_units), len(py_units))
     bad = int(np.sum(rtl_units[:n] != py_units[:n])) if n else -1
     ok_u = (n > 0 and bad == 0 and len(rtl_units) == len(py_units) and ovf == 0
-            and fd_err == 0)
+            and fd_err == 0 and bd_err == 0)
     print(f"rtl out: {len(rtl_units)} units vs python {len(py_units)}, "
           f"mismatches={bad}  fifo_overflow={ovf}")
     # fd_err bits: {cfg_unsupported, hdr_no_train, fseq_collision,
     #               seq_err, b2_overflow, b1_overflow}
     print(f"fd     : err=0b{fd_err:06b}  B1 high-water {fd_b1}/1280  "
           f"B2 high-water {fd_b2}/512")
+    # bd_err bits: {seq_err, unit_collision}
+    print(f"bd     : err=0b{bd_err:02b}  coded-bit FIFO high-water {bd_cb}/27648")
     # Under noise the RTL (fixed point) and Python (float64) can legitimately
     # make DIFFERENT marginal decisions, so report both the divergence and
     # whether each actually recovered the payload.
