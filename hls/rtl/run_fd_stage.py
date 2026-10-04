@@ -96,7 +96,7 @@ def run(binary, wdir, name, stim, exp, cfg, cps, stall, gap=64, expect=0):
     out = r.stdout + r.stderr
     ok = "TB_RESULT PASS" in out
     info = [l[4:] for l in out.splitlines() if l.startswith("TB: ") and
-            ("high-water" in l or "MISMATCH" in l or "STABILITY" in l or
+            ("high-water" in l or "MISMATCH" in l or "STABILITY" in l or "latency" in l or
              "EXTRA" in l or "flags" in l or "outputs" in l)]
     return ok, info, out
 
@@ -190,6 +190,9 @@ def main():
                 worst_b2 = max(worst_b2, int(m.group(2)))
                 hq_seen += int(m.group(3))
         print(f"{'PASS' if ok else 'FAIL'}  {tag:60s} {hw}")
+        lat = next((i for i in info if "latency" in i), "")
+        if lat and mode == "normal":
+            print(f"        {lat}")
         if not ok:
             fails += 1
             for i in info:

@@ -1,7 +1,8 @@
 # RX modular architecture — time / frequency / bit domain
 
-Status: **INTERFACES FROZEN (I1, I2, C1, symbol-type enum), 2026-10-03.**
-The stage refactor has not started. H11 (rate dependence) and H12 (CFO
+Status: **INTERFACES FROZEN (I1, I2, C1, symbol-type enum), 2026-10-03.
+Step 3 (frequency domain) DONE 2026-10-04, see §9b; steps 4 (bit domain)
+and 5 (time domain) next.** H11 (rate dependence) and H12 (CFO
 never applied) are FIXED in the time domain; the receiver is now
 bit-exact against Python and rate-invariant at C = 1, 2.5, 5, 10, 20.
 
@@ -597,6 +598,124 @@ C=1 + whole-frame B2 as a stress build only.
 
 ---
 
+## 9b. Step 3 result: the frequency-domain stage as built (measured)
+
+Commits `ed4d1e7` (3a), `4cccdad` + `763e0a8` (3b), `e8f7e93` (3c).
+`src/rx_freq_domain.v` is a standalone block with exactly three port
+groups: the TD→FD bin stream (`in_*`, no ready), the C1 config bundle
+(`cfg_*`), and the FD→BIT LLR stream (`out_*`, valid/ready), plus sticky
+status. Everything else is private: B1, the classifier, channel estimate
+and H store, both equalizers, CPE and its metadata FIFO, the header queue,
+the demapper (with BPSK), and B2.
+
+### Explicit dependencies that used to be timing coincidences
+
+| Dependency | Old RTL | New FD |
+|---|---|---|
+| **HEADER needs H** for its own frame | assumed: the estimator sweep happened to finish before the header bins arrived | B1 releases HEADER only when `h_done && h_fseq` matches; `st_hdr_no_train` catches the deadlock case |
+| BODY needs the frame's config (modulation, length) | assumed: header decoded before payload reached the demapper (H3) | B1 releases BODY only on a valid config for its `fseq`, after its header has left |
+| Payload length for frame termination (H2) | time domain read `n_pay_sym` unconditionally (reset value 1) | TD reads `cfg_body_syms` only while config valid; keeps capturing until then; FD drops extras |
+| A header must not overtake older data in CPE | never arose | header queue, released only when CPE holds no data (`cm_level == 0`) |
+
+**H2 failed for real in 3c.** With the header correctly waiting for its H
+(about 238 clocks at C=1), header decode landed after the end of the first
+payload slot. The old TD then ended the frame after one symbol: the header
+decoded, and zero bytes came out. The fix is the frozen design (TD learns
+the length from C1), pulled forward from step 5.
+
+### Measured
+
+**B1 / B2 occupancy.** Full table in §9 B1. Worst over 87 stage
+scenarios: B1 **1,024 / 1,280 (80%)**, B2 **207 / 512**. In the integrated
+receiver (`run_frame.py`, which now reports both): B1 235 at C=1, 2 at C=10.
+
+**FD latency** (`run_fd_stage.py --quick`, config applied 150 clocks after
+the header is out):
+
+| | C=1 | C=10 |
+|---|---|---|
+| first header bin in → first header LLR out | 251 clk (waits for H) | 36 clk (pipeline only) |
+| last input bin → `frame_end` out | 268–633 clk | 268 clk |
+
+The 268-clock tail is CPE holding the last symbol until its last pilot,
+then rotating it (216 items + CORDIC). The longer C=1 tails on short frames
+are BODY still waiting in B1 for the config.
+
+**Timing** (post-route, XC7A50T, 100 MHz, out of context): **WNS +0.362 ns,
+0 failing endpoints**, WHS +0.036 ns. The first 3c run failed at
+−0.452 ns (153 endpoints): Vivado put `grid_extract`'s `sc` ROM and its
+register in a block RAM, and BRAM clock-to-out fed the H-store read and
+the equalizer DSPs in one cycle. `rom_style = "distributed"` restored a
+flip-flop source (the rundown §6 rule: a memory output must not feed
+consumer logic directly). The gain from +0.149 ns is placement variation,
+not evidence the new logic is faster.
+
+**Resources**, `rx_top` total (before = `763e0a8`, after = `e8f7e93`):
+
+| | Before | After | Δ |
+|---|---|---|---|
+| LUT | 13,582 | 14,011 | +429 |
+| FF | 12,605 | 12,996 | +391 |
+| BRAM tiles | 18.5 | 25.5 | +7 |
+| DSP | 58 | 58 | 0 |
+
+Per block (Vivado hierarchical report):
+
+| Block | LUT before → after | FF | BRAM36 / BRAM18 | DSP |
+|---|---|---|---|---|
+| frequency domain | 3,206 → 3,665 | 2,764 → 3,116 | 0/8 → 6/10 | 28 → 30 |
+| └ B1 (1,280 × 86 bit) | — → 135 | 36 | 5 / 0 | 0 |
+| └ B2, CPE metadata FIFO | — → 64 + 60 | 30 + 31 | 0 / 1 + 1 | 0 |
+| └ demapper (moved in from BD) | 77 → 104 | 21 → 47 | 0 / 0 | 2 |
+| bit decoder (old) | 3,334 → 3,260 | 948 → 927 | 7 / 0 | 2 → 0 |
+| time domain (old) | 6,958 → 7,005 | 8,691 → 8,739 | 4 / 7 | 28 |
+
+The DSP total is unchanged because the demapper's 2 DSPs moved from the
+bit decoder into FD. The real cost of the refactor is B1 (5 BRAM36, a
+review decision), two small FIFOs, and about 350 LUTs of metadata
+pipelines and release logic.
+
+### Status of the hidden dependencies (§5)
+
+| | Status after step 3 |
+|---|---|
+| H1 broadcast `frame_start` reset | **gone inside FD**; still in the old TD/header/BD (steps 4, 5) |
+| H2 `n_pay_sym` race | **fixed** (TD reads `cfg_body_syms` from C1) |
+| H3 demap scheme latched | **gone** (modulation travels per item) |
+| H4 BD started by `hdr_done` | open, step 4 |
+| H5 header special case in EQ bookkeeping | **gone** |
+| H6 H read address from `g_symdone` | **gone** (`sc` from the grid ROM) |
+| H7 top-level `h_bin` counter | **gone** (`ls_chanest.h_bin`) |
+| H8 host-supplied `cfg_encoded_bits` | unchanged (open item, step 4/7) |
+| H9 whole-frame coded-bit FIFO | unchanged until step 4 measures B2 |
+| H10 `hdr_cnt` | **gone** |
+| H11, H12 front-end rate / CFO | fixed before step 3 |
+
+### What the temporary adapters still owe
+
+`rx_top.v` holds three blocks marked `TEMPORARY STEP-3 ADAPTER`:
+**A** (old TD → TD→FD bus: derives `sym_idx`, `fseq`, `frame_start`;
+removed in step 5); **B** (FD→BIT bus → old header and bit blocks,
+`out_ready` tied high; removed in step 4); **C** (old header block → C1,
+valid only once `n_pay_sym` is final; removed in step 4). The old bit
+decoder lost its demapper, and the old header block gained a `cfg_final`
+output; both blocks are replaced wholesale in step 4.
+
+### Verification added in step 3
+
+- `run_fd_stage.py` + `tb/rx_freq_domain_tb.v`: 87 scenarios, one build.
+  Bit-exact against `golden_if/`; stall stability; delayed, wrong-`fseq`
+  and `cfg_err` config; back-to-back frames; legal `fseq` wrap; negative
+  tests for `fseq` collision and missing training; B1/B2 high-water and
+  latency reported per run.
+- `check_golden.sh`: re-captures every reference frame from the
+  integrated design (taps on the real TD→FD and FD→BIT buses) and requires
+  byte-identical I2/C1/output, and I1 identical up to droppable trailing
+  BODY symbols.
+- Unit testbenches assert metadata alignment (`$fatal`).
+- A pre-existing harness bug was fixed: `rx_top_tb` wrote its status lines
+  after closing the file, so `fifo_overflow` had never been checked.
+
 ## 10. Testbench strategy
 
 Two references, used for different questions:
@@ -659,9 +778,10 @@ bit-exact. No algorithm, width or rounding changes until step 6 is done.
    (`DM_BPSK`); `ls_chanest.h_bin`; `cp_fft.out_bin`. Gate: `check_chain`
    11/11 with metadata assertions, `check_golden.sh` 14/14 byte-identical
    to golden_if/ at C=1 and C=10, `rate_matrix.sh` 45/45.
-   **FD**: I1 in, I2 out; B1 + classify (all BODY → DATA); metadata
-   through `grid_extract`/`ls_chanest`/`mmse_eq`/`pilot_cpe`; demapper moves
-   in with BPSK; B2. `tb_rx_freq_domain`.
+   ✅ **3b/3c/3d**: standalone `rx_freq_domain` on the frozen interfaces,
+   integrated with temporary adapters, measured and documented (§9b).
+   Gate at `e8f7e93`: golden 14/14, rate matrix 45/45, check_chain 11/11,
+   FD stage 87/87, WNS +0.362 ns.
 4. **BD**: I2 in; header parser on `stype=HEADER`; config publisher (C1);
    payload chain started by metadata. `tb_rx_bit_domain`.
 5. **TD**: I1 out with `sym_idx`/`fseq`; FSM reads C1; no broadcast

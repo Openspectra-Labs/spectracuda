@@ -816,6 +816,15 @@ pin existed, run_frame.py silently used the working tree and failed with
 "header never decoded" / "2000 payload bits -> 268 encoded" (the header's
 conv_v27 call mistaken for the payload's).
 
+**0a. Frequency-domain stage alone (~10 min).** Standalone, against the
+committed reference dumps -- no Python:
+
+    python run_fd_stage.py          # 87 scenarios; --quick for 14
+
+**0b. Bit-exact vs the reference dumps, integrated (~10 min).**
+
+    ./check_golden.sh               # golden_if/: all 7 frames at C=1 and C=10
+
 **0. Rate invariance, every C (~25 min).**
 
     ./rate_matrix.sh      # 9 configs x C = 1, 2.5, 5, 10, 20; exit 0 = all pass

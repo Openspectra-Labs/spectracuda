@@ -205,6 +205,7 @@ module rx_freq_domain_tb;
     integer hdr_end_cyc [0:63];          // by frame ordinal
     integer n_hdr_end = 0;
     integer ci = 0, ev_cyc = -1, cfg_out_cyc = -1, first_hdr_out_cyc = -1;
+    integer last_fe_cyc = -1;
 
     always @(posedge clk) if (!rst && ci < nc) begin
         if (n_hdr_end > c_tf[ci] && cyc >= hdr_end_cyc[c_tf[ci]] + c_dl[ci]) begin
@@ -244,6 +245,7 @@ module rx_freq_domain_tb;
 
         if (out_valid && out_ready) begin
             if (out_stype == 3'd1 && first_hdr_out_cyc < 0) first_hdr_out_cyc = cyc;
+            if (out_fe) last_fe_cyc = cyc;
             if (out_stype == 3'd1 && out_se) begin
                 hdr_end_cyc[n_hdr_end] = cyc;
                 n_hdr_end = n_hdr_end + 1;
@@ -294,8 +296,8 @@ module rx_freq_domain_tb;
                  b1_ovf, b2_ovf, seq_err, cfg_uns, fseq_col, hdr_no_tr, b1_level);
         $display("TB: B1 high-water %0d of %0d, B2 high-water %0d of 512, hq_held=%0d",
                  b1_hwm, 5*256, b2_hwm, hq_held);
-        $display("TB: first header bin in -> first header group out: %0d clk; cfg applied at %0d",
-                 first_hdr_out_cyc - in_first_hdr_cyc, cfg_out_cyc);
+        $display("TB: latency first header bin in -> first header group out: %0d clk; last input bin -> last frame_end out: %0d clk",
+                 first_hdr_out_cyc - in_first_hdr_cyc, last_fe_cyc - in_last_cyc);
         if (ei == ne && errors == 0 && extra == 0 && stab_err == 0 &&
             !b1_ovf && !b2_ovf && !seq_err && !cfg_uns && !fseq_col && !hdr_no_tr &&
             b1_level == 0)
