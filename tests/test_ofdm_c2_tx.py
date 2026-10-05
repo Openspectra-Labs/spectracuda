@@ -4,7 +4,7 @@ The receiver does not understand the region yet -- that is step 4 -- so
 these pull the C2 symbols back out of the emitted waveform by hand and
 decode them directly, rather than round-tripping through rx_process().
 
-See docs/2026-09-20-critical-c2-region-plan.md.
+See docs/plans/2026-09-20-critical-c2-region-plan.md.
 """
 import numpy as np
 import pytest

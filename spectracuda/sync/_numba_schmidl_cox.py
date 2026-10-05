@@ -76,7 +76,7 @@ def _get_row_kernel():
         import numba
 
         # nogil=True: safe here for the same reason the CFO kernels use it
-        # (see docs/2026-09-09-numba-cfo-kernel.md's "If resuming" note) --
+        # (see docs/reports/2026-09-09-numba-cfo-kernel.md's "If resuming" note) --
         # this function only reads its own batch row's slice of an
         # already-allocated numpy array and returns plain scalars, no
         # Python-object/shared-state touching inside the loop. Without

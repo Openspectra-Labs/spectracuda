@@ -7,7 +7,7 @@ STATUS AS OF THIS FILE'S CREATION: design scaffolding only, NOT a
 working accelerator. hexagon_available() below always returns False on
 every machine this has actually been run on (no Hexagon SDK, no Q6A
 hardware were available in that session -- see
-docs/hexagon-fec-offload-plan.md, written the same session, for the
+docs/plans/hexagon-fec-offload-plan.md, written the same session, for the
 full plan/rationale/open risks). This file exists so that:
   (a) fec/viterbi.py's dispatch chain has a real, correctly-gated slot
       to check, wired in now rather than left as a TODO comment -- it
@@ -15,7 +15,7 @@ full plan/rationale/open risks). This file exists so that:
       compiled+deployed DSP skel, because of the AND of conditions in
       hexagon_available() below.
   (b) whoever picks this up next (once the Hexagon SDK + a Radxa Q6A
-      are both in hand -- see docs/hexagon-fec-offload-plan.md's own
+      are both in hand -- see docs/plans/hexagon-fec-offload-plan.md's own
       "Do I have..." checklist) has the CPU-side shape already decided
       and only needs to fill in _open()/_decode_batch()/_close() with
       calls into the qaic-generated FastRPC stub, not design the whole
@@ -69,7 +69,7 @@ _hexagon_available = False
 # for this interface, if one existed -- NOT verified against Radxa's
 # own BSP docs (not in this repo's reference/qc6490/ material, which is
 # HVX-ISA-reference and product-brief PDFs only, no FastRPC/skel-
-# deployment documentation -- see docs/hexagon-fec-offload-plan.md's
+# deployment documentation -- see docs/plans/hexagon-fec-offload-plan.md's
 # "Open risks" section). Almost certainly wrong path/filename; treat as
 # a placeholder to correct once real deployment docs are in hand, not
 # as a verified fact.
@@ -87,7 +87,7 @@ _SKEL_CANDIDATE_PATHS = (
 # domain a stock Radxa Q6A image actually exposes to an unprivileged
 # process, and whether it needs an entitlement/signing step Radxa's own
 # BSP would have to grant, is an OPEN QUESTION, not yet answered (see
-# docs/hexagon-fec-offload-plan.md).
+# docs/plans/hexagon-fec-offload-plan.md).
 _FASTRPC_LIBS = ("libcdsprpc.so", "libadsprpc.so")
 
 
@@ -148,7 +148,7 @@ class NativeConvolutionalHexagon:
     real (always-False) gate to check, not a speculative name.
 
     What goes here once the Hexagon SDK + a Radxa Q6A are both in hand
-    (see docs/hexagon-fec-offload-plan.md for the full plan):
+    (see docs/plans/hexagon-fec-offload-plan.md for the full plan):
       - __init__: `qaic`-compile spectracuda/fec/_native_src/hexagon/
         fec_hexagon.idl into its generated stub, ctypes-load the
         generated stub .so (NOT the DSP-side skel directly -- the stub
@@ -191,7 +191,7 @@ class NativeConvolutionalHexagon:
         # filling in the real FastRPC calls below.
         raise NotImplementedError(
             "NativeConvolutionalHexagon's FastRPC calls are not yet implemented -- "
-            "see this class's own docstring and docs/hexagon-fec-offload-plan.md"
+            "see this class's own docstring and docs/plans/hexagon-fec-offload-plan.md"
         )
 
     def encode(self, bits: np.ndarray) -> np.ndarray:  # pragma: no cover - unimplemented

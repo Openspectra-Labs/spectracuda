@@ -6,7 +6,7 @@ its own FEC, so that losing the video does not lose the control link:
 
     main payload fails CRC   =/=>   C2 fails
 
-See docs/2026-09-20-critical-c2-region-plan.md.
+See docs/plans/2026-09-20-critical-c2-region-plan.md.
 
 **The profile is fixed, not signalled.** There is no `c2_mcs` or
 `c2_fec` header field. The receiver does not need to be told which

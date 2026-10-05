@@ -1,7 +1,7 @@
 """Regression tests for two alignment-dependent frame losses in
 Ofdm.rx_streaming()'s SEEKING state, both found 2026-09-09 on a CLEAN,
 zero-noise channel while measuring streaming per-call overhead (see
-docs/2026-09-09-rx-streaming-partial-preamble-fix.md):
+docs/reports/2026-09-09-rx-streaming-partial-preamble-fix.md):
 
 1. Premature sync trigger on a PARTIALLY-arrived preamble. With k of the
    preamble's fft_size samples in the buffer (k > L = fft_size/2), the

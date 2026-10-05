@@ -21,7 +21,7 @@ below rotates the second tap instead, making H[k] both
 frequency-selective and time-varying, which no single phase correction
 can undo.
 
-See docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
+See docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
 """
 import numpy as np
 import pytest
@@ -65,14 +65,14 @@ def time_varying_two_ray(tx, a=0.5, fd=100.0, fs=FS, snr_db=30.0, seed=0):
     `fd` here is a DIFFERENTIAL Doppler -- it rides on the echo while the
     LOS path stays put. A shift common to both paths is what CFO/CPE
     already remove; only the difference ages H[k]. See
-    docs/2026-09-21-dmrs-differential-doppler-characterization.md.
+    docs/reports/2026-09-21-dmrs-differential-doppler-characterization.md.
 
     Built from `sim.Channel`'s `tap_doppler_hz`, which exists because
     neither `multipath_taps` (static) nor `cfo` (one common rotation)
     could express this. `tail_samples` and `noise_draw_len` are the two
     methodology settings whose absence silently corrupted an earlier
     round of measurements -- see that class's docstring and
-    docs/2026-09-20-dmrs-static-channel-cost.md.
+    docs/reports/2026-09-20-dmrs-static-channel-cost.md.
     """
     return Channel(
         snr_db=snr_db,

@@ -1,6 +1,6 @@
 # 2026-09-09 session: rx_streaming() alignment-dependent frame loss (fixed) + streaming overhead re-measured
 
-Started as a follow-up measurement to `docs/2026-09-09-numba-sync-kernel.md`
+Started as a follow-up measurement to `docs/reports/2026-09-09-numba-sync-kernel.md`
 ("re-measure `rx_streaming()`'s per-call overhead now that sync is 5x
 faster") and turned up a real correctness bug in the live receive path
 along the way. Both are recorded here. Machine: the x86 WSL2 dev box,

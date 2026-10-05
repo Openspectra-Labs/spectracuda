@@ -4,7 +4,7 @@ the trailing-DMRS rule or in the slot positions produces a frame that
 transmits and decodes, just against the wrong channel estimate -- so
 these assert the numbers directly rather than round-tripping them.
 
-See docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
+See docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
 """
 import numpy as np
 import pytest

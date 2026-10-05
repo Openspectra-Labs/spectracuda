@@ -131,7 +131,7 @@ def test_batch_shape_contract(codecs):
 def test_dispatch_prefers_fast_on_measured_architectures(monkeypatch):
     """Measured before being made the default on each: x86 dev box 16 vs
     48 ns/bit; Pi-5 24 vs 122 ns/bit (2026-09-09, see
-    docs/2026-09-09-fast-viterbi-kernel.md). Any other architecture gets
+    docs/reports/2026-09-09-fast-viterbi-kernel.md). Any other architecture gets
     the unmeasured generic build only via the env override."""
     monkeypatch.delenv("SPECTRACUDA_VITERBI_BACKEND", raising=False)
     from spectracuda.fec.viterbi import ConvolutionalCode

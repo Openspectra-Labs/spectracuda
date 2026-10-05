@@ -2,7 +2,7 @@
 
 **Decision recorded 2026-09-21. Simulation-backed, hardware-unvalidated.**
 Supersedes nothing; it is the operating-point choice that follows from
-`docs/2026-09-21-dmrs-differential-doppler-characterization.md` and the
+`docs/reports/2026-09-21-dmrs-differential-doppler-characterization.md` and the
 runs under `debug/dmrs_doppler_*/`.
 
 All figures assume the 320-sample symbol (`fft_size=256`, `cp_len=64`),
@@ -77,7 +77,7 @@ so of the four settings above:
 `iv=8` now has a second, independent case needing it: at 20 MSps with a
 strong echo (a=0.6) and 300 Hz of differential Doppler, iv=32 delivers
 7/60 and iv=16 delivers 57/60, but iv=8 (144 us true) reaches 59/60 --
-see `docs/2026-09-21-multipath-severity-characterization.md` §9. So the
+see `docs/reports/2026-09-21-multipath-severity-characterization.md` §9. So the
 missing code blocks a measured 20 MSps case, not only the 10 MSps
 high-mobility mode it was first noted for.
 
@@ -116,7 +116,7 @@ work and an FPGA cost evaluation.
 `Ofdm(soft_decision=True)`, **off by default** — which is the correct
 engineering choice until that optimization and quantization work is
 finished. See
-`docs/2026-09-21-multipath-severity-characterization.md` §7.
+`docs/reports/2026-09-21-multipath-severity-characterization.md` §7.
 
 One consequence worth noting for the table above: the a=0.4 / 500 ns /
 300 Hz case previously needed `iv=16` to survive and is recovered by soft

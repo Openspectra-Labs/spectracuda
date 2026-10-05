@@ -1,7 +1,7 @@
 """Dump golden vectors from spectracuda's real pipeline for the HLS
 testbenches to check against.
 
-This is the "B" approach (see docs/vitis-hls-ofdm-ip-plan.md): the HLS
+This is the "B" approach (see archive/hls-cpp/vitis-hls-ofdm-ip-plan.md): the HLS
 blocks implement SPECTRACUDA's frame format, so spectracuda's Python --
 which is RF-validated between two Plutos -- is the golden model. Nothing
 here reimplements the algorithm; it calls the same `SchmidlCoxSync` the

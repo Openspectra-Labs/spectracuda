@@ -359,7 +359,7 @@ class Ofdm(Block):
         # roughly half of 16QAM's usable budget, before the channel has
         # done anything. Measured in examples/dmrs_doppler_study.py
         # (--part sync) and written up in
-        # docs/2026-09-21-dmrs-differential-doppler-characterization.md.
+        # docs/reports/2026-09-21-dmrs-differential-doppler-characterization.md.
         #
         # Applied at `pos` (the OFDM window origin) and NOT to
         # start_index, so the CFO estimator keeps using the preamble
@@ -390,7 +390,7 @@ class Ofdm(Block):
         # libcorrect has no `fast`/`neon` SOFT decoder, so soft decode
         # always runs the portable loop. Buy it only where the coding gain
         # is worth that -- see
-        # docs/2026-09-21-multipath-severity-characterization.md, where
+        # docs/reports/2026-09-21-multipath-severity-characterization.md, where
         # hard-decision Viterbi AMPLIFIES errors on frequency-contiguous
         # fades because faded subcarriers arrive marked maximally
         # confident.
@@ -470,7 +470,7 @@ class Ofdm(Block):
         # burst into ~6-bit gaps -- same errors, a regime the code handles
         # easily. Measured 0/40 -> 38/40 on the case neither DMRS nor soft
         # decision could reach; see
-        # docs/2026-09-21-multipath-severity-characterization.md.
+        # docs/reports/2026-09-21-multipath-severity-characterization.md.
         #
         # Applied PER OFDM SYMBOL (block = bits_per_ofdm_symbol), which is
         # the depth 802.11a/g uses: it bounds latency and matches the
@@ -2047,7 +2047,7 @@ class Ofdm(Block):
         self._stream_frame_start = None
         self._stream_header: Optional[Dict[str, Any]] = None
         # TEMP diagnostic (root-causing 1024B-payload real-RF loss, see
-        # docs/2026-09-06-rx-packet-loss-and-ism-band-characterization.md
+        # docs/reports/2026-09-06-rx-packet-loss-and-ism-band-characterization.md
         # -- remove once that investigation is closed out): counts WHERE
         # rx_streaming() gives up on a candidate frame, to distinguish
         # "never even triggered on a real preamble" from "triggered, but

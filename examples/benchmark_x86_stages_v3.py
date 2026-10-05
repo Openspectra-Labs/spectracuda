@@ -145,7 +145,7 @@ def _parse_args():
     demapper does a max-log LLR pass instead of a nearest-point decision,
     and libcorrect has no fast/neon SOFT kernel so the decode forfeits
     the accelerated one. It buys large multipath robustness -- see
-    docs/2026-09-21-multipath-severity-characterization.md -- so the
+    docs/reports/2026-09-21-multipath-severity-characterization.md -- so the
     question this flag exists to answer is what that robustness costs.
 
     Note the real-time budget MOVES with cp: it is frame_samples / 20 MSps,

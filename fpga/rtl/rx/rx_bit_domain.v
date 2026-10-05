@@ -7,7 +7,7 @@
 //   C1         per-frame config, published to FD / TD   (cfg_*)
 //   O1         deinterleaved bytes + frame end + fseq   (out_*) -> host
 //
-// Interfaces: docs/rx_modular_architecture.md section 7. Reed-Solomon,
+// Interfaces: fpga/docs/rx_modular_architecture.md section 7. Reed-Solomon,
 // payload CRC and the MAC stay on the host (rundown section 2).
 //
 // Inside, the input is routed by symbol type:

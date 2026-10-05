@@ -187,7 +187,7 @@ def emit_grid(ofdm: Ofdm, out_dir: str) -> list:
     # Per-bin ORDINAL: a data bin's index among the data bins, a pilot
     # bin's among the pilots (null bins: 0). grid_extract.v emits it as
     # `sc` with each item, so H storage and everything downstream address
-    # by metadata instead of counting items (docs/rx_modular_architecture.md
+    # by metadata instead of counting items (fpga/docs/rx_modular_architecture.md
     # H6). Ordinals follow ascending bin order -- the order grid_extract
     # emits in -- which must also be Python's order, or the RTL's stream
     # and extract_data()'s columns would disagree.
@@ -616,7 +616,7 @@ def emit_demap(ofdm: Ofdm, out_dir: str) -> list:
                 f"`define DM_{u}_BIAS 64'sd{bias_q}\n")
     # BPSK is used only by the header. Its hard decision is the sign of the
     # real part, bit = ~sign(re) -- the same decision rx_top made inline
-    # before the header moved onto the demapper (docs/rx_modular_architecture.md
+    # before the header moved onto the demapper (fpga/docs/rx_modular_architecture.md
     # step 3). No scale/bias: nothing is quantized.
     hdr += ("\n// header only: bit = ~sign(re), one bit per subcarrier\n"
             "`define DM_BPSK 3\n")

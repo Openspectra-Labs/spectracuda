@@ -22,7 +22,7 @@
 // time domain already knows -- so this block is stateless: type and
 // ordinal are two ROM lookups on in_bin. It used to count bins itself
 // and resynchronise on a `sof` pulse, i.e. it rebuilt position that its
-// producer already had (docs/rx_modular_architecture.md section 6).
+// producer already had (fpga/docs/rx_modular_architecture.md section 6).
 //
 // out_sc is the bin's ORDINAL among data bins (0..N_DATA-1) or among
 // pilot bins (0..N_PILOT-1), whichever stream it is emitted on, from the

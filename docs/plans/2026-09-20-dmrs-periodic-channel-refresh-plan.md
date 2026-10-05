@@ -2,7 +2,7 @@
 
 **Status: planned 2026-09-20, not started.**
 
-Agreed after reading the FlexLink PHY spec (`docs/flexlink-spec-review.md`
+Agreed after reading the FlexLink PHY spec (`docs/plans/flexlink-spec-review.md`
 covers that document's own defects separately). FlexLink is an unvalidated
 paper spec with no published measurements, so it is treated here as one
 data point on how others structure the problem, **not** as an authority.

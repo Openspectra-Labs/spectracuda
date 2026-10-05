@@ -9,7 +9,7 @@ checks that the new stage reproduces the old one bit-exactly.
     python run_fd_stage.py            # all scenarios
     python run_fd_stage.py --quick    # normal mode only, C=1 and C=10
 
-Scenarios (docs/rx_modular_architecture.md section 10):
+Scenarios (fpga/docs/rx_modular_architecture.md section 10):
   normal     config 150 clocks after the header is out
   stall      + random out_ready stalls
   delayed    config ~2.5 symbols late, so BODY piles up in B1

@@ -16,7 +16,7 @@
 // the bins from here on. The frame length comes back on the C1 config
 // interface (cfg_body_syms, only meaningful while cfg_body_valid): until
 // it arrives the FSM keeps capturing BODY symbols, and the frequency
-// domain drops any past the real end (docs/rx_modular_architecture.md
+// domain drops any past the real end (fpga/docs/rx_modular_architecture.md
 // section 7, I1 has no frame_end).
 //
 // Moved verbatim out of rx_top.v (sections 1-4); see that file's

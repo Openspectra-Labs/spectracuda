@@ -18,7 +18,7 @@ Override (for deliberate experiments only): SPECTRACUDA_REF=/path/to/tree.
 The format check still runs, so pointing it at a tree with the protected
 header stops with an explanation instead of producing wrong verdicts.
 
-When the RTL gains the new header (docs/rx_modular_architecture.md
+When the RTL gains the new header (fpga/docs/rx_modular_architecture.md
 section 11, step 7), move REF_COMMIT forward and drop the format check.
 """
 from __future__ import annotations

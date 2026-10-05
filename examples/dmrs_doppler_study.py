@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Why 16QAM loses frames under Doppler, and what DMRS interval actually
-fixes it -- see docs/2026-09-21-dmrs-differential-doppler-characterization.md.
+fixes it -- see docs/reports/2026-09-21-dmrs-differential-doppler-characterization.md.
 
 Nothing here touches the production PHY. Two harness-only extensions make
 the design space reachable, both reverted before the process exits:
@@ -133,7 +133,7 @@ def channel(tx, a=A_DEFAULT, f_los=0.0, f_echo=0.0, delay=1,
 
     `tail_samples` and `noise_draw_len` are the two methodology settings
     whose absence silently corrupted an earlier round of measurements --
-    Channel's own docstring and docs/2026-09-20-dmrs-static-channel-cost.md
+    Channel's own docstring and docs/reports/2026-09-20-dmrs-static-channel-cost.md
     explain both. They live in the shared class now rather than being
     re-derived per harness.
     """

@@ -7,7 +7,7 @@ decision boundary. On a frequency-selective channel a deeply faded
 subcarrier therefore hands the decoder WRONG bits marked maximally
 confident, indistinguishable from good ones -- and measurement shows
 Viterbi then amplifies rather than corrects (raw BER 0.052 in, 0.071
-out). See docs/2026-09-21-multipath-severity-characterization.md.
+out). See docs/reports/2026-09-21-multipath-severity-characterization.md.
 
 The central invariant, asserted below: feeding hard bits to the soft
 decoder as 0/255 returns EXACTLY the hard answer. All of the gain comes

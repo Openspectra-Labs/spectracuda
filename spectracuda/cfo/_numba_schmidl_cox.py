@@ -7,13 +7,13 @@ and a missing/failed import falls back to the existing numpy path with
 no error and no API change).
 
 **Two separate targets here, benchmarked separately before deciding
-which was worth fusing** (see docs/2026-09-09-numba-cfo-kernel.md):
+which was worth fusing** (see docs/reports/2026-09-09-numba-cfo-kernel.md):
 
 1. `correct()` -- runs over the WHOLE received frame's samples (~38K for
    this project's standard config) on every RX call: builds a float32
    angle array, then cos(angle)/sin(angle)/complex-assemble/multiply as
    4 separate full-array passes over the frame. This is the one flagged
-   in docs/2026-08-27-neon-viterbi-and-rx-throughput.md as "already
+   in docs/reports/2026-08-27-neon-viterbi-and-rx-throughput.md as "already
    hand-optimized once (cos/sin instead of xp.exp), still unexamined for
    fused-kernel treatment."
 

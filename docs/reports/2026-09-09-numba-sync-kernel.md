@@ -1,6 +1,6 @@
 # 2026-09-09 session: fused Numba sync/CFO kernel
 
-Follow-up to `docs/2026-08-27-neon-viterbi-and-rx-throughput.md`'s
+Follow-up to `docs/reports/2026-08-27-neon-viterbi-and-rx-throughput.md`'s
 section 3 ("NOT DONE: sync/CFO acceleration, diagnosed only") -- that
 diagnosis is now implemented.
 

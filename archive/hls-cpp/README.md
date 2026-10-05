@@ -1,6 +1,6 @@
 # hls/ — spectracuda's OFDM chain for Vitis HLS
 
-Approach **B** from [`docs/vitis-hls-ofdm-ip-plan.md`](../docs/vitis-hls-ofdm-ip-plan.md):
+Approach **B** from [`vitis-hls-ofdm-ip-plan.md`](vitis-hls-ofdm-ip-plan.md):
 the HLS blocks implement **spectracuda's** frame format, so spectracuda's
 Python — RF-validated between two Plutos — is the golden model.
 

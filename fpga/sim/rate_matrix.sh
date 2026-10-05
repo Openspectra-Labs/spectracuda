@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rate-invariance matrix (docs/rx_modular_architecture.md, Rule 0 / H11).
+# Rate-invariance matrix (fpga/docs/rx_modular_architecture.md, Rule 0 / H11).
 #
 # Every frame config at every clocks-per-sample ratio C. Each run must be
 # bit-exact against the pinned Python reference (golden_ref.py), AND its

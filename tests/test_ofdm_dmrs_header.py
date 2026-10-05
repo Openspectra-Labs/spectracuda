@@ -10,7 +10,7 @@ Byte 5 was `fec1 & 0x1F` -- its top three bits were unconditionally zero
 and the decoder already masked them off, so the field costs no header
 space and an older decoder still recovers fec1 correctly.
 
-See docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
+See docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
 """
 import numpy as np
 import pytest

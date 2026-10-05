@@ -8,7 +8,7 @@ This is a HARDWARE SIZING question, not a software one. An FPGA Viterbi's
 branch-metric and path-metric widths follow directly from the LLR width,
 so the interesting number is the smallest quantization that keeps the
 coding gain measured in
-docs/2026-09-21-multipath-severity-characterization.md.
+docs/reports/2026-09-21-multipath-severity-characterization.md.
 
 Two knobs, both mattering:
   * llr_bits  -- signed quantization, 2L+1 levels with L = 2^(b-1)-1.

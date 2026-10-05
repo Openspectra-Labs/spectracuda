@@ -5,7 +5,7 @@
 // it exists; it changes only when it is popped. That gives two properties
 // the receiver relies on:
 //   * a valid/ready output built on it holds every field stable while
-//     ready is low (the I2 rule, docs/rx_modular_architecture.md section 7);
+//     ready is low (the I2 rule, fpga/docs/rx_modular_architecture.md section 7);
 //   * the memory's read data always lands in a register before any
 //     consumer logic (rundown section 6, "a memory output that feeds a
 //     consumer gets its own register stage").

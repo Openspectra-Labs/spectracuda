@@ -15,7 +15,7 @@ multipath echo biases the contest toward the LATE candidate -- and does
 so MORE reliably as SNR rises, because a cleaner metric resolves a peak
 the echo has genuinely shifted.
 
-See docs/2026-09-21-dmrs-differential-doppler-characterization.md and
+See docs/reports/2026-09-21-dmrs-differential-doppler-characterization.md and
 examples/dmrs_doppler_study.py --part sync.
 """
 from __future__ import annotations
@@ -75,7 +75,7 @@ def test_default_is_two_samples():
 
 
 def test_default_is_clamped_by_a_small_cp():
-    """cp_len=0 is legal (see hls/gen/emit.py's note). Without a CP there
+    """cp_len=0 is legal (see fpga/gen/emit.py's note). Without a CP there
     is no early direction to move in, so 'auto' must resolve to 0 rather
     than pushing the window outside the symbol."""
     assert make(cp_len=0).timing_advance == 0

@@ -46,7 +46,7 @@ module demapper #(
     parameter integer W      = 18,      // Q12 input, from mmse_eq
     // Sideband that rides the SAME valid pipeline as the symbol, so the
     // metadata leaving with `bits` is the metadata that entered with
-    // y_re/y_im (docs/rx_modular_architecture.md, rule: metadata is part
+    // y_re/y_im (fpga/docs/rx_modular_architecture.md, rule: metadata is part
     // of the data). Opaque here. Width >= 1; tie to 0 if unused.
     parameter integer META_W = 1
 )(

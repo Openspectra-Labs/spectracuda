@@ -3,7 +3,7 @@
 //
 // Included INSIDE rx_top_tb when RXT_CAPTURE_DIR is defined (run_frame.py
 // --capture DIR). Writes, in the formats frozen in
-// docs/rx_modular_architecture.md section 7:
+// fpga/docs/rx_modular_architecture.md section 7:
 //
 //   i1.txt  TD -> FD   one FFT bin per line:
 //           fseq sym_idx bin stype re im

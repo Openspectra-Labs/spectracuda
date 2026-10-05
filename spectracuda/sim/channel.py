@@ -43,7 +43,7 @@ their absolute values. `tap_doppler_hz=[1600, 1600]` is a 1600 Hz common
 shift that CFO+CPE absorb, leaving the frequency-selective shape static;
 `[1600, 1900]` carries the same common shift plus 300 Hz of DIFFERENTIAL
 Doppler, and only the latter makes the initial estimate go stale. See
-docs/2026-09-21-dmrs-differential-doppler-characterization.md, which
+docs/reports/2026-09-21-dmrs-differential-doppler-characterization.md, which
 measures that separation directly.
 
 The phase uses the OUTPUT sample index n, not n-k, so `taps[k]`'s shift
@@ -56,7 +56,7 @@ folded into the tap's own complex value either way.
 TWO METHODOLOGY KNOBS (`tail_samples`, `noise_draw_len`)
 --------------------------------------------------------
 Both exist because getting them wrong silently corrupted a real round of
-measurements -- see docs/2026-09-20-dmrs-static-channel-cost.md, where
+measurements -- see docs/reports/2026-09-20-dmrs-static-channel-cost.md, where
 the resulting artifact was initially mistaken for a genuine DMRS cost:
 
 * `tail_samples` appends that many zeros to the input BEFORE the channel

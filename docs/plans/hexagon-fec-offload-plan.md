@@ -4,7 +4,7 @@
 OFDM: `MAC <-> FEC <-> OFDM`) to run on the Hexagon DSP on a QCS6490
 SoC, target board Radxa Q6A. Starting point: this repo's own
 `reference/qc6490/` groundwork and the Pi5-proven NEON Viterbi kernel
-(`docs/2026-08-27-neon-viterbi-and-rx-throughput.md`).
+(`docs/reports/2026-08-27-neon-viterbi-and-rx-throughput.md`).
 
 **Session constraints (stated up front, not discovered mid-work):** no
 Hexagon SDK, no Q6A/Radxa hardware. Nothing in this doc or the files it

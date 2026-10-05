@@ -5,9 +5,9 @@ was reproduced after correcting the experiment.**
 
 Related:
 
-- `docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md` — the feature;
+- `docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md` — the feature;
 - `tests/test_ofdm_dmrs_rx.py` — controlled time-varying-channel validation;
-- `docs/2026-09-06-rx-packet-loss-and-ism-band-characterization.md` — real
+- `docs/reports/2026-09-06-rx-packet-loss-and-ism-band-characterization.md` — real
   Pi/Pluto packet-loss investigation.
 
 ## Summary

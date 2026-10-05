@@ -1,7 +1,7 @@
 """Emit HLS configuration headers from a constructed `Ofdm` object.
 
 This is the generator half of the architecture in
-`docs/vitis-hls-ofdm-ip-plan.md` section 2: **Python emits parameters,
+`archive/hls-cpp/vitis-hls-ofdm-ip-plan.md` section 2: **Python emits parameters,
 tables and ROM contents; it never emits DSP source code.** The blocks in
 `hls/src/` are hand-written once and `#include` what this produces.
 

@@ -1,4 +1,4 @@
-# `hls/` rundown — read this before asking what's left to build
+# `fpga/` rundown — read this before asking what's left to build
 
 > ## 🔒 RX RECEIVER LOCKED — 2026-09-14
 > Bit-exact against Python (QPSK/QAM16/QAM64, to 2048-byte packets),
@@ -1019,7 +1019,7 @@ to it.
 - **Regenerating openofdm is currently blocked** — the Xilinx Viterbi
   LogiCORE license fails to check out (FlexNet -5,357). Our own
   `xc7a50t` synthesis is unaffected (built-in free license).
-- **`docs/vitis-hls-ofdm-ip-plan.md` is stale in two places.** It was
+- **`archive/hls-cpp/vitis-hls-ofdm-ip-plan.md` is stale in two places.** It was
   written for the HLS track, and its section 1.1 sizes a Reed–Solomon
   decoder in fabric. Both are superseded by sections 2 and 3 above. The
   plan doc is still useful for the folding/cycles-per-sample analysis and
@@ -1548,7 +1548,7 @@ wrong fix.
 
 ### Three caveats on "the front end does 1 sample/clock"
 
-- **FIXED 2026-10-03 -- see docs/rx_modular_architecture.md H11/H12.**
+- **FIXED 2026-10-03 -- see fpga/docs/rx_modular_architecture.md H11/H12.**
   The receiver is now rate-invariant (identical FFT output at C = 1, 2.5,
   5, 10, 20) and the CFO estimate is actually applied (it never was).
   Original note kept below for history.

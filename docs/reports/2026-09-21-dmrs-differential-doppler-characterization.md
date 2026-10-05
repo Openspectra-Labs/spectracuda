@@ -9,8 +9,8 @@ sweep | analytic | genie`).
 
 Related:
 
-- `docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md` — the feature;
-- `docs/2026-09-20-dmrs-static-channel-cost.md` — the earlier retraction,
+- `docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md` — the feature;
+- `docs/reports/2026-09-20-dmrs-static-channel-cost.md` — the earlier retraction,
   whose methodology rules (trailing samples, length-independent noise)
   this study follows;
 - `docs/spectracuda-phy-specification.md` §11 — still correctly states

@@ -5,7 +5,7 @@ Nothing transmits a C2 region yet -- that is steps 3 and 4. This covers
 the wire format and the fixed profile, which everything after depends
 on.
 
-See docs/2026-09-20-critical-c2-region-plan.md.
+See docs/plans/2026-09-20-critical-c2-region-plan.md.
 """
 import numpy as np
 import pytest

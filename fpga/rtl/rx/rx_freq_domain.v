@@ -5,7 +5,7 @@
 //   C1        per-frame config from the bit domain   (cfg_*)
 //   FD -> BIT LLR groups + metadata, valid/ready      (out_*)
 //
-// Interfaces are the frozen ones in docs/rx_modular_architecture.md
+// Interfaces are the frozen ones in fpga/docs/rx_modular_architecture.md
 // section 7 (I1 = in_*, I2 = out_*, C1 = cfg_*); widths in rx_if.vh.
 // Nothing outside this module needs to know how it schedules anything.
 //

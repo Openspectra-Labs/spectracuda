@@ -73,7 +73,7 @@ trick — real, documented, reproducible, not a vendor-supported path.
 Full session record, every number, every bug fixed along the way (TX/RX
 FEC-scheme mismatch, a streaming-buffer boundary bug that structurally
 dropped any preamble straddling a chunk edge, a libiio teardown segfault):
-{doc}`2026-09-06-rx-packet-loss-and-ism-band-characterization`.
+{doc}`reports/2026-09-06-rx-packet-loss-and-ism-band-characterization`.
 
 ## Acknowledged-mode (ARQ) retransmission
 
@@ -95,11 +95,11 @@ directly against a real Pi 5, including a first attempt that measured as
 a genuine **2.1x regression** (kept in the source, correctly never wired
 into the dispatch chain) before a wider rewrite got it to a real,
 measured win. Full session record:
-{doc}`2026-08-27-neon-viterbi-and-rx-throughput`.
+{doc}`reports/2026-08-27-neon-viterbi-and-rx-throughput`.
 
 ```{toctree}
 :hidden:
 
-2026-09-06-rx-packet-loss-and-ism-band-characterization
-2026-08-27-neon-viterbi-and-rx-throughput
+reports/2026-09-06-rx-packet-loss-and-ism-band-characterization
+reports/2026-08-27-neon-viterbi-and-rx-throughput
 ```

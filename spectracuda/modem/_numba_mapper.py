@@ -8,7 +8,7 @@ failed import falls back to the existing numpy path with no error and no
 API change.
 
 **Why this exists**: cProfile over 40 real QPSK frames (2026-09-09, see
-docs/2026-09-09-rx-streaming-partial-preamble-fix.md section 3) put
+docs/reports/2026-09-09-rx-streaming-partial-preamble-fix.md section 3) put
 ~1 ms/frame of the RX "everything else" bucket in three back-to-back
 sweeps over the same 27648 payload symbols: `Modem.demodulate` (the
 generic M-QAM path -- descale, round/clip per axis, gray, bit-unpack,

@@ -47,7 +47,7 @@
 //    for -- 216*6 = 1296 bits per symbol against 288 sample-clocks. It
 //    absorbs a symbol, not a frame. At the real 10 Msps / 100 MHz
 //    budget there are ~10 clocks per sample and the problem disappears;
-//    see the folding analysis in docs/vitis-hls-ofdm-ip-plan.md.
+//    see the folding analysis in archive/hls-cpp/vitis-hls-ofdm-ip-plan.md.
 //
 // 3. NOTHING HERE HAS BEEN SYNTHESIZED OR SIMULATED END TO END.
 //    cp_fft instantiates xfft_256, which needs Xilinx simulation

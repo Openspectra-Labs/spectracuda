@@ -2,7 +2,7 @@
 """Does a FREQUENCY interleaver (between conv and the mapper) recover the
 broad-fade case? Characterization only -- production PHY untouched.
 
-The hypothesis, from docs/2026-09-21-multipath-severity-characterization.md:
+The hypothesis, from docs/reports/2026-09-21-multipath-severity-characterization.md:
 
   A 1-sample echo puts ONE wide null across the band (17% of subcarriers
   faded, widest run 36 bins). At 216 data subcarriers x 4 bits that is

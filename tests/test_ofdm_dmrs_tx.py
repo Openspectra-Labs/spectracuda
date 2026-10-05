@@ -4,7 +4,7 @@ payload symbols and DMRS out against framing/dmrs.py's slot map.
 The receiver does not understand DMRS yet -- that is step 3 -- so these
 assert the emitted waveform directly rather than round-tripping it.
 
-See docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
+See docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
 """
 import numpy as np
 import pytest

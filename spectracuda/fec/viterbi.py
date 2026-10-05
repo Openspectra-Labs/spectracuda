@@ -136,7 +136,7 @@ class ConvolutionalCode(Block):
         # earns being wired in here.
         # Hexagon DSP offload (QCS6490/Radxa Q6A) -- see
         # fec/_native_hexagon.py's own module docstring and
-        # docs/hexagon-fec-offload-plan.md for the full design. Checked
+        # docs/plans/hexagon-fec-offload-plan.md for the full design. Checked
         # FIRST, ahead of SSE/NEON, on the a priori theory that HVX's
         # 1024-bit vectors (8x NEON's 128-bit) should win the same
         # ACS-inner-loop speedup NEON already proved out, scaled up --
@@ -224,7 +224,7 @@ class ConvolutionalCode(Block):
         if hexagon_available():
             return NativeConvolutionalHexagon()
         # Measured on both real targets before being preferred here (see
-        # docs/2026-09-09-fast-viterbi-kernel.md): x86_64 16 vs SSE4.1's
+        # docs/reports/2026-09-09-fast-viterbi-kernel.md): x86_64 16 vs SSE4.1's
         # 48 ns/bit (3x); Pi-5 aarch64 24 vs NEON's 122 ns/bit (5.1x, the
         # 32032-bit PDU 3.92 -> 0.76 ms). Other architectures compile the
         # generic vector-extension backend, which is unmeasured, so they

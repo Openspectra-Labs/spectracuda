@@ -1,5 +1,5 @@
 #!/bin/bash
-# Capture the stage-boundary reference dumps (docs/rx_modular_architecture.md
+# Capture the stage-boundary reference dumps (fpga/docs/rx_modular_architecture.md
 # section 10) from the CURRENT, pre-refactor RTL into fixtures/frames/.
 #
 # Each case runs at C=1 and C=10; every dump (i1, i2, c1, o1, stimulus)

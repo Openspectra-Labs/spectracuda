@@ -13,7 +13,7 @@ the frame. Per-symbol pilots then track common phase error continuously,
 but they cannot re-measure the frequency-selective shape of H[k]. On a
 long frame that initial estimate goes stale. A DMRS is the training
 symbol re-transmitted mid-payload so H[k] can be measured again -- see
-docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
+docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
 
 Two conventions this module fixes, both of which are easy to get subtly
 wrong and are therefore asserted directly in tests/test_framing_dmrs.py:

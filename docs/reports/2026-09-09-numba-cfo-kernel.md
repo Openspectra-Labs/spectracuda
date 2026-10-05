@@ -1,6 +1,6 @@
 # 2026-09-09 session: fused Numba CFO estimate/correct kernels
 
-Follow-up to `docs/2026-09-09-numba-sync-kernel.md`'s "If resuming work
+Follow-up to `docs/reports/2026-09-09-numba-sync-kernel.md`'s "If resuming work
 on this kernel" section -- `SchmidlCoxCFO.correct()`'s cos/sin pass and
 the per-batch-item Python loop in `SchmidlCoxCFO.process()` are now
 both accelerated.

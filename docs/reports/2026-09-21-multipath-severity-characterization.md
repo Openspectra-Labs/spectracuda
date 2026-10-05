@@ -410,7 +410,7 @@ lever each time (il2 at Δf=0, both at 100, DMRS at 300).
 **Practical blocker, now with a concrete case.** `iv=8` is what nearly
 closes a=0.6 at Δf=300 (59/60) and it has no wire code: the 2-bit
 `dmrs_period` field carries {0,16,32,64}. This was already recorded in
-`docs/2026-09-21-dmrs-interval-operating-guidance.md` as a blocker for the
+`docs/reports/2026-09-21-dmrs-interval-operating-guidance.md` as a blocker for the
 10 MSps high-mobility mode; there is now a specific channel that needs it.
 
 **Remaining edge of the envelope.** a=0.8 at Δf=300 stays broken with all

@@ -15,7 +15,7 @@ never reach:
   the MAC would oversize a segment and `generate_frame()` would raise --
   at maximum segment size, on real traffic.
 
-See docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
+See docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md.
 """
 import numpy as np
 import pytest

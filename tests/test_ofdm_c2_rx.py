@@ -16,7 +16,7 @@ garbage -- which is why the 64QAM/256QAM cases below matter more than
 the QPSK ones. With both regions at QPSK a boundary error is masked,
 because the symbols either side of it carry the same bits per symbol.
 
-See docs/2026-09-20-critical-c2-region-plan.md.
+See docs/plans/2026-09-20-critical-c2-region-plan.md.
 """
 import numpy as np
 import pytest

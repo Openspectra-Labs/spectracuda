@@ -2,7 +2,7 @@
 
 **Status: planned 2026-09-20, not started.**
 
-Follows the DMRS work (`docs/2026-09-20-dmrs-periodic-channel-refresh-plan.md`,
+Follows the DMRS work (`docs/plans/2026-09-20-dmrs-periodic-channel-refresh-plan.md`,
 steps 1-6 shipped on `feat/dmrs-periodic-channel-refresh`).
 
 ## Goal
@@ -253,7 +253,7 @@ right.
 ### 7. Measure
 
 PER of C2 vs main across SNR, on the corrected harness from
-`docs/2026-09-20-dmrs-static-channel-cost.md` (trailing capture samples,
+`docs/reports/2026-09-20-dmrs-static-channel-cost.md` (trailing capture samples,
 length-independent paired noise, bounds failures counted separately).
 The number that matters: **C2 delivery at SNRs where main payload
 delivery has already collapsed.**

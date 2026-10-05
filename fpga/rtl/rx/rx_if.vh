@@ -2,7 +2,7 @@
 // rx_if.vh -- FROZEN stage-interface definitions (2026-10-03)
 //
 // Single source for the symbol-type enum and the widths of the three
-// stage interfaces defined in docs/rx_modular_architecture.md section 7:
+// stage interfaces defined in fpga/docs/rx_modular_architecture.md section 7:
 //
 //   I1  rx_time_domain -> rx_freq_domain   FFT bins, no backpressure
 //   I2  rx_freq_domain -> rx_bit_domain    LLR groups, valid/ready

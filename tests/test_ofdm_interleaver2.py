@@ -19,7 +19,7 @@ K=7 traceback of ~35-49 bits. The trellis has no reliable observation
 anywhere in the window and Viterbi amplifies rather than corrects.
 Permuting within the symbol turns that into ~6-bit gaps: same errors, a
 regime the code handles. See
-docs/2026-09-21-multipath-severity-characterization.md.
+docs/reports/2026-09-21-multipath-severity-characterization.md.
 """
 from __future__ import annotations
 

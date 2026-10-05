@@ -3,7 +3,7 @@
 Captured once from the **pre-refactor RTL** (branch `HDL_SPECTRA`, after
 `bbdd110`: rate-invariant front end + CFO fix) by `capture_golden.sh`, with
 the pinned Python reference `ad0a396` (`golden_ref.py`). The refactored
-stages (docs/rx_modular_architecture.md section 11) must reproduce these
+stages (fpga/docs/rx_modular_architecture.md section 11) must reproduce these
 **bit-exactly**: they are the proof that the refactor changed structure,
 not behaviour.
 
