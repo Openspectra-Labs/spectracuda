@@ -439,8 +439,10 @@ class Ofdm(Block):
         #              times 2^k, k = |H[k]|^2 / mean_train|H|^2 rounded to
         #              a power of two in [1/8, 2] -- comparators and shifts
         #              in hardware. What the RTL receiver implements.
-        if soft_llr_metric not in ("maxlog", "thresh_w"):
-            raise ValueError(f"soft_llr_metric={soft_llr_metric!r}; expected 'maxlog' or 'thresh_w'")
+        #   "thresh_wq" the same, quantized exactly as the FPGA does it
+        #              (Modem.demodulate_soft_tableq: 2-BRAM lookup table).
+        if soft_llr_metric not in ("maxlog", "thresh_w", "thresh_wq"):
+            raise ValueError(f"soft_llr_metric={soft_llr_metric!r}; expected 'maxlog', 'thresh_w' or 'thresh_wq'")
         self.soft_llr_metric = soft_llr_metric
         self._train_h2_sum = None        # per batch row, set by the header decode
         self._stream_noise = None        # per batch row, set by the header decode
@@ -1941,7 +1943,7 @@ class Ofdm(Block):
                 w = w.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
                     n_batch * n_payload_symbols, -1
                 )
-            if self.soft_llr_metric == "thresh_w":
+            if self.soft_llr_metric in ("thresh_w", "thresh_wq"):
                 # k = -3 + #{m in -3..0 : n_data*|H[k]|^2 >= sqrt(2)*sum_train|H|^2*2^m}
                 # i.e. |H[k]|^2 / mean rounded to a power of two, clamped to
                 # [1/8, 2] -- exactly the RTL's comparisons (llr_weight.v)
@@ -1953,9 +1955,12 @@ class Ofdm(Block):
                 if n_c2:
                     kexp = kexp.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
                         n_batch * n_payload_symbols, -1)
-                soft_payload = payload_modem.demodulate_soft_thresh(
-                    equalized_combined, kexp,
-                    llr_bits=self.soft_llr_bits if self.soft_llr_bits else 4)
+                if self.soft_llr_metric == "thresh_wq":
+                    soft_payload = payload_modem.demodulate_soft_tableq(equalized_combined, kexp)
+                else:
+                    soft_payload = payload_modem.demodulate_soft_thresh(
+                        equalized_combined, kexp,
+                        llr_bits=self.soft_llr_bits if self.soft_llr_bits else 4)
             else:
                 soft_payload = payload_modem.demodulate_soft(
                     equalized_combined, weight=w,

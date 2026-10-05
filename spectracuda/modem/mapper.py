@@ -309,6 +309,63 @@ class Modem(Block):
         soft = np.clip(np.rint(128.0 + 127.0 * out / L), 0, 255).astype("uint8")
         return xp.asarray(soft.reshape(y.shape[0], -1))
 
+    #: thresh_wq lookup table: y step 2^-s per modulation (>= 4 fractional
+    #: bits of x/norm), 9-bit signed index, t stored as Q4 (T = round(16 t))
+    #: clipped past saturation for every weight. The FPGA demapper reads
+    #: exactly this table (hls/rtl/src/generated/soft_table.mem).
+    SOFT_TABLE_SHIFT = {"qpsk": 5, "qam16": 6, "qam64": 7}
+    SOFT_TABLE_IDX_BITS = 9
+    SOFT_TABLE_T_CLIP = 1024
+
+    def soft_table(self) -> np.ndarray:
+        """(512, 3) int table of T = round(16 t) per signed index (row
+        idx & 511) and axis bit j (0 = MSB of the axis label), for this
+        modulation; unused bits are 0. t = (L1-L0)(2 xn - L0 - L1) at
+        xn = idx * 2^-s / norm (the index's own value)."""
+        s = self.SOFT_TABLE_SHIFT[self.scheme]
+        pts, labels = self._point_table()
+        lev = np.unique(np.round(np.asarray(pts).real, 6))
+        norm = float(np.min(np.abs(lev)))
+        nlev = len(lev); half = int(np.log2(nlev))
+        L = np.arange(nlev) * 2 - (nlev - 1)
+        gray = np.array([a ^ (a >> 1) for a in range(nlev)])
+        n = 1 << self.SOFT_TABLE_IDX_BITS
+        idx = np.arange(n); idx = np.where(idx >= n // 2, idx - n, idx)      # two's complement rows
+        xn = idx * 2.0 ** -s / norm
+        tab = np.zeros((n, 3), dtype=np.int64)
+        for j in range(half):
+            bit = (gray >> (half - 1 - j)) & 1
+            d = np.abs(xn[:, None] - L[None, :])
+            l0 = L[np.argmin(np.where(bit[None, :] == 0, d, np.inf), axis=1)]
+            l1 = L[np.argmin(np.where(bit[None, :] == 1, d, np.inf), axis=1)]
+            t = (l1 - l0) * (2 * xn - l0 - l1)
+            tab[:, j] = np.clip(np.rint(16.0 * t), -self.SOFT_TABLE_T_CLIP, self.SOFT_TABLE_T_CLIP)
+        return tab
+
+    def demodulate_soft_tableq(self, symbols: Any, weight_exp: Any) -> Any:
+        """thresh_w as the FPGA computes it (Ofdm soft_llr_metric="thresh_wq"):
+        per axis idx = clip(floor(y * 2^s + 1/2), -256, 255), T = soft_table()
+        [idx], and per bit q = clip(round_half_even(7 T 2^k / 64), -7, 7).
+        Output bytes as demodulate_soft (128 + 127 q / 7, > 128 = bit 1).
+        Validated against the full-precision thresh_w in
+        examples/soft_thresh_precision_study.py (same frame error rate)."""
+        y = symbols.get() if hasattr(symbols, "get") else np.asarray(symbols)
+        if y.ndim == 1:
+            y = y[None, :]
+        s = self.SOFT_TABLE_SHIFT[self.scheme]
+        tab = self.soft_table()
+        half = self.bits_per_symbol // 2
+        n = 1 << self.SOFT_TABLE_IDX_BITS
+        k = np.asarray(weight_exp, dtype=np.int64)
+        out = np.empty(y.shape + (2 * half,), dtype=np.int64)
+        for ax, comp in ((0, np.real(y)), (1, np.imag(y))):
+            idx = np.clip(np.floor(comp * 2.0 ** s + 0.5), -n // 2, n // 2 - 1).astype(np.int64) & (n - 1)
+            for j in range(half):
+                T = tab[idx, j]
+                out[..., ax * half + j] = np.clip(np.rint(7.0 * T * np.ldexp(1.0, k) / 64.0), -7, 7)
+        soft = np.clip(np.rint(128.0 + 127.0 * out / 7.0), 0, 255).astype("uint8")
+        return self.xp.asarray(soft.reshape(y.shape[0], -1))
+
     def demodulate_stats(self, symbols: Any) -> Tuple[Any, Any, Any]:
         """demodulate() plus the two per-row power sums EVM is built from:
         (bits, sum |symbol - nearest_point|^2, sum |nearest_point|^2), each
