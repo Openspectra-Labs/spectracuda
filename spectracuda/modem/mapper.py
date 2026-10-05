@@ -315,7 +315,7 @@ class Modem(Block):
     #: exactly this table (hls/rtl/src/generated/soft_table.mem).
     SOFT_TABLE_SHIFT = {"qpsk": 5, "qam16": 6, "qam64": 7}
     SOFT_TABLE_IDX_BITS = 9
-    SOFT_TABLE_T_CLIP = 1024
+    SOFT_TABLE_T_CLIP = 1023      # 11-bit signed table field (+1024 would wrap)
 
     def soft_table(self) -> np.ndarray:
         """(512, 3) int table of T = round(16 t) per signed index (row

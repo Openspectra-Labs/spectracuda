@@ -1,3 +1,6 @@
+`include "ofdm_params.vh"
+`include "grid_params.vh"
+`include "header_params.vh"
 // ============================================================
 // rx_freq_domain_tb.v -- standalone test of the frequency-domain stage
 //
@@ -28,7 +31,11 @@
 `timescale 1ns / 1ps
 
 module rx_freq_domain_tb;
-    localparam integer LLR_W = 1;
+`ifndef TB_LLR_W
+`define TB_LLR_W 4
+`endif
+    // 4 = the v3 chain (soft demapper); 1 = the old hard-decision FD
+    localparam integer LLR_W = `TB_LLR_W;
     localparam integer MAXS  = 131072;
     localparam integer MAXE  = 65536;
     localparam integer MAXC  = 16;
@@ -88,7 +95,7 @@ module rx_freq_domain_tb;
     reg  [1:0]  e_fq [0:MAXE-1];
     reg  [7:0]  e_sym[0:MAXE-1], e_sc[0:MAXE-1];
     reg  [2:0]  e_st [0:MAXE-1], e_n [0:MAXE-1];
-    reg  [5:0]  e_llr[0:MAXE-1];
+    reg  [23:0] e_llr[0:MAXE-1];   // 6 x 4-bit values (hard: 0 / -1)
     reg  [3:0]  e_mk [0:MAXE-1];          // {ss, se, fs, fe}
     integer ne = 0;
 
@@ -123,7 +130,8 @@ module rx_freq_domain_tb;
                             a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
                 if (r == 15) begin
                     e_fq[ne] = a0; e_sym[ne] = a1; e_sc[ne] = a2; e_st[ne] = a3; e_n[ne] = a4;
-                    e_llr[ne] = {a10[0], a9[0], a8[0], a7[0], a6[0], a5[0]};
+                    e_llr[ne] = (LLR_W == 1) ? {18'd0, a10[0], a9[0], a8[0], a7[0], a6[0], a5[0]}
+                                          : {a10[3:0], a9[3:0], a8[3:0], a7[3:0], a6[3:0], a5[3:0]};
                     e_mk[ne]  = {a11[0], a12[0], a13[0], a14[0]};
                     ne = ne + 1;
                 end
@@ -246,7 +254,9 @@ module rx_freq_domain_tb;
         if (out_valid && out_ready) begin
             if (out_stype == 3'd1 && first_hdr_out_cyc < 0) first_hdr_out_cyc = cyc;
             if (out_fe) last_fe_cyc = cyc;
-            if (out_stype == 3'd1 && out_se) begin
+            // a frame's header ends on its LAST header symbol (v3: 2 symbols)
+            if (out_stype == 3'd1 && out_se &&
+                out_sym == 8'(`N_TRAINING + `HDR_TOTAL_SLOTS / `N_DATA - 1)) begin
                 hdr_end_cyc[n_hdr_end] = cyc;
                 n_hdr_end = n_hdr_end + 1;
             end
@@ -255,7 +265,7 @@ module rx_freq_domain_tb;
                 if (extra <= 5) $display("TB: EXTRA output fseq=%0d sym=%0d sc=%0d st=%0d", out_fseq, out_sym, out_sc, out_stype);
             end else begin
                 if (out_fseq != e_fq[ei] || out_sym != e_sym[ei] || out_sc != e_sc[ei] ||
-                    out_stype != e_st[ei] || out_n != e_n[ei] || out_llr != e_llr[ei] ||
+                    out_stype != e_st[ei] || out_n != e_n[ei] || out_llr != e_llr[ei][6*LLR_W-1:0] ||
                     {out_ss, out_se, out_fs, out_fe} != e_mk[ei]) begin
                     errors = errors + 1;
                     if (errors <= 10)

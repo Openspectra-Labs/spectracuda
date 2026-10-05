@@ -96,7 +96,7 @@ def main():
     ap.add_argument("--il2", action="store_true",
                     help="interleave each data symbol with interleaver2's exact "
                          "permutation and run the bit domain with IL2=1")
-    ap.add_argument("--llr-w", type=int, default=1,
+    ap.add_argument("--llr-w", type=int, default=4,
                     help="4 = soft bit domain fed the reference as +/-7 LLRs")
     a = ap.parse_args()
     wdir = os.path.join(HERE, "build", f"bd_stage_{os.getpid()}_{uuid.uuid4().hex[:8]}")

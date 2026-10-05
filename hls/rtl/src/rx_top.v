@@ -137,7 +137,9 @@ module rx_top #(
     output wire [15:0]                bd_cb_hwm
 );
     `include "rx_if.vh"
-    localparam integer LLR_W = 1;
+    // 4-bit soft decision: FD's demapper_soft -> I2 -> BD's soft Viterbi
+    // (viterbi_dec_soft). 1 = the hard-decision chain.
+    localparam integer LLR_W = 4;
 
     // ---------------------------------------------------------------
     // Stages, wired. Target (step 5): rx_time_domain -> rx_freq_domain

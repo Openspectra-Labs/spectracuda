@@ -21,13 +21,13 @@ synth_ip [get_ips xfft_256]
 foreach f {rx_top rx_time_domain rx_freq_domain sync_fifo_fwft rx_bit_domain
            sc_sync_rtl frame_sync cfo_estimate cfo_correct
            cordic_rot cordic_vec cp_fft grid_extract ls_chanest
-           mmse_eq pilot_cpe header_decode demapper viterbi_dec viterbi_dec_ovl viterbi_dec_soft cdc_async_fifo cdc_bundle cdc_reset_sync il2_deint viterbi_dec_ovl
+           mmse_eq pilot_cpe header_decode demapper demapper_soft llr_weight viterbi_dec viterbi_dec_ovl viterbi_dec_soft cdc_async_fifo cdc_bundle cdc_reset_sync il2_deint viterbi_dec_ovl
            deinterleaver} {
     add_files "$root/src/$f.v"
 }
 set_property include_dirs [list "$root/src" "$root/src/generated"] [current_fileset]
 
-foreach f [get_files -quiet {*grid_extract.v *header_decode.v *frame_sync.v *pilot_cpe.v *rx_top.v *rx_time_domain.v *rx_freq_domain.v *sync_fifo_fwft.v *rx_bit_domain.v}] {
+foreach f [get_files -quiet {*grid_extract.v *header_decode.v *frame_sync.v *pilot_cpe.v *rx_top.v *rx_time_domain.v *rx_freq_domain.v *sync_fifo_fwft.v *rx_bit_domain.v *demapper_soft.v *llr_weight.v}] {
     set_property file_type SystemVerilog $f
 }
 

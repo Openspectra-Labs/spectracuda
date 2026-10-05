@@ -150,7 +150,10 @@ module viterbi_dec_soft #(
     // ---- survivor RAM: two copies, one per engine ----------------------
     (* ram_style = "distributed" *) reg [NS-1:0] sram0 [0:RAM_D-1];
     (* ram_style = "distributed" *) reg [NS-1:0] sram1 [0:RAM_D-1];
-    reg [RAM_AW-1:0] wptr;
+    // The write pointer addresses two 256 x 64-bit LUT-RAM copies (~1,000
+    // loads): at 125 MHz its fan-out was the whole-BD critical path (0 logic
+    // levels, 93% routing). Let synthesis replicate it.
+    (* max_fanout = 64 *) reg [RAM_AW-1:0] wptr;
 
     // ---- control -------------------------------------------------------
     reg         running;          // between start and the flush job
@@ -238,6 +241,10 @@ module viterbi_dec_soft #(
     // ---- traceback engines ----------------------------------------------
     localparam [1:0] E_IDLE = 2'd0, E_DISC = 2'd1, E_EMIT = 2'd2, E_HAND = 2'd3;
     reg [1:0]          e_st   [0:1];
+    // e_ptr holds the survivor-RAM address the engine reads NEXT, i.e. the
+    // traceback position minus one, pre-decremented so the RAM address comes
+    // straight from a register (the subtractor in the traceback loop cost
+    // 0.26 ns at 125 MHz in the full receiver). Same addresses as before.
     reg [RAM_AW-1:0]   e_ptr  [0:1];
     reg [5:0]          e_ts   [0:1];
     reg [CW:0]         e_cnt  [0:1];
@@ -259,8 +266,8 @@ module viterbi_dec_soft #(
     reg                s_fl;
 
     // next traceback state, read from each engine's own RAM copy
-    wire [RAM_AW-1:0] rp0 = e_ptr[0] - 1'b1;
-    wire [RAM_AW-1:0] rp1 = e_ptr[1] - 1'b1;
+    wire [RAM_AW-1:0] rp0 = e_ptr[0];
+    wire [RAM_AW-1:0] rp1 = e_ptr[1];
     wire [5:0] nx0 = {sram0[rp0][e_ts[0]], e_ts[0][5:1]};
     wire [5:0] nx1 = {sram1[rp1][e_ts[1]], e_ts[1][5:1]};
 
@@ -321,7 +328,7 @@ module viterbi_dec_soft #(
             // ---- dispatch the queued job to the next engine in turn ----
             if (dispatch) begin
                 e_st[disp]   <= q_flush ? E_EMIT : E_DISC;
-                e_ptr[disp]  <= q_head;
+                e_ptr[disp]  <= q_head - 1'b1;
                 e_ts[disp]   <= q_start;
                 e_cnt[disp]  <= 0;
                 e_ndis[disp] <= q_flush ? 0 : TB_DISCARD;

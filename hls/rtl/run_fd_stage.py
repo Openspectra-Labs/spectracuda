@@ -37,7 +37,7 @@ GOLD = os.path.join(HERE, "golden_if")
 N_DATA = 216
 SRCS = ["tb/rx_freq_domain_tb.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v",
         "src/grid_extract.v", "src/ls_chanest.v", "src/mmse_eq.v", "src/pilot_cpe.v",
-        "src/demapper.v", "src/cordic_rot.v", "src/cordic_vec.v"]
+        "src/demapper.v", "src/demapper_soft.v", "src/llr_weight.v", "src/cordic_rot.v", "src/cordic_vec.v"]
 
 
 def read_rows(path):
