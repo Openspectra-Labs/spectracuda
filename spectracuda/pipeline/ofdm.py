@@ -305,6 +305,7 @@ class Ofdm(Block):
         soft_llr_bits: Optional[int] = None,
         soft_llr_clip: float = 6.0,
         soft_llr_scale: str = "frame",
+        soft_llr_metric: str = "maxlog",
         interleaver2: str = "block",
         interleaver2_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -431,6 +432,17 @@ class Ofdm(Block):
         if soft_llr_scale not in ("frame", "stream"):
             raise ValueError(f"soft_llr_scale={soft_llr_scale!r}; expected 'frame' or 'stream'")
         self.soft_llr_scale = soft_llr_scale
+        # Soft metric:
+        #   "maxlog"   (default) Modem.demodulate_soft, scaled per
+        #              soft_llr_scale above.
+        #   "thresh_w" Modem.demodulate_soft_thresh: fixed-scale max-log
+        #              times 2^k, k = |H[k]|^2 / mean_train|H|^2 rounded to
+        #              a power of two in [1/8, 2] -- comparators and shifts
+        #              in hardware. What the RTL receiver implements.
+        if soft_llr_metric not in ("maxlog", "thresh_w"):
+            raise ValueError(f"soft_llr_metric={soft_llr_metric!r}; expected 'maxlog' or 'thresh_w'")
+        self.soft_llr_metric = soft_llr_metric
+        self._train_h2_sum = None        # per batch row, set by the header decode
         self._stream_noise = None        # per batch row, set by the header decode
         self._stream_h2_mean = None
         # INNER (frequency) interleaver: permutes the coded bits AFTER
@@ -1361,6 +1373,8 @@ class Ofdm(Block):
         # soft_llr_scale="stream": the noise power and the |H|^2 normalizer
         # a streaming receiver has BEFORE its first payload symbol (see
         # __init__). Per batch row.
+        # thresh_w: sum of |H|^2 over the training estimate's data bins
+        self._train_h2_sum = xp.sum(xp.abs(h_hat_data) ** 2, axis=-1)
         if self.soft_llr_scale == "stream":
             heq = xp.concatenate(header_eq_chunks, axis=-1)
             hp, _ = self.header_modem._point_table()
@@ -1927,10 +1941,26 @@ class Ofdm(Block):
                 w = w.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
                     n_batch * n_payload_symbols, -1
                 )
-            soft_payload = payload_modem.demodulate_soft(
-                equalized_combined, weight=w,
-                llr_clip=self.soft_llr_clip, llr_bits=self.soft_llr_bits,
-                sigma2=sigma2_override)
+            if self.soft_llr_metric == "thresh_w":
+                # k = -3 + #{m in -3..0 : n_data*|H[k]|^2 >= sqrt(2)*sum_train|H|^2*2^m}
+                # i.e. |H[k]|^2 / mean rounded to a power of two, clamped to
+                # [1/8, 2] -- exactly the RTL's comparisons (llr_weight.v)
+                h2 = xp.abs(h_hat_combined) ** 2
+                ref = xp.repeat(self._train_h2_sum, n_data_total)[:, None] * float(np.sqrt(2.0))
+                kexp = xp.full(h2.shape, -3, dtype="int64")
+                for mm in (-3, -2, -1, 0):
+                    kexp = kexp + (h2 * self.grid.n_data >= ref * (2.0 ** mm))
+                if n_c2:
+                    kexp = kexp.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
+                        n_batch * n_payload_symbols, -1)
+                soft_payload = payload_modem.demodulate_soft_thresh(
+                    equalized_combined, kexp,
+                    llr_bits=self.soft_llr_bits if self.soft_llr_bits else 4)
+            else:
+                soft_payload = payload_modem.demodulate_soft(
+                    equalized_combined, weight=w,
+                    llr_clip=self.soft_llr_clip, llr_bits=self.soft_llr_bits,
+                    sigma2=sigma2_override)
             # Soft values take the SAME inverse permutation as the hard
             # bits -- they are per-coded-bit quantities in the same order,
             # so a soft path that skipped this would hand Viterbi

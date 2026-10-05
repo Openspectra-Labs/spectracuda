@@ -268,6 +268,47 @@ class Modem(Block):
         soft = xp.clip(xp.round(128.0 + 127.0 * llr), 0, 255).astype("uint8")
         return soft.reshape(y.shape[0], -1)
 
+    def demodulate_soft_thresh(self, symbols: Any, weight_exp: Any,
+                               llr_bits: int = 4) -> Any:
+        """Hardware-cheap soft demodulation ("thresh_w"): the max-log value
+        with a FIXED scale instead of a measured noise power, times a
+        power-of-two channel weight. Same libcorrect byte convention as
+        demodulate_soft (128 + 127*q/L, > 128 means bit 1).
+
+        Per bit, with xn = x / norm (constellation levels at odd integers)
+        and L0 / L1 the nearest levels whose label bit is 0 / 1:
+            t = (L1 - L0) * (2*xn - L0 - L1)       (= raw max-log / norm^2)
+            q = clip(round(L * t * 2^k / 4), -L, L),   L = 2^(llr_bits-1) - 1
+        t = 4 is the boundary-nearest constellation point, so an unweighted
+        value saturates exactly there. For Gray QAM t is piecewise linear in
+        x with breakpoints at the decision boundaries: comparators + shifts
+        in hardware, no multiplier (hls/rtl/src/demapper_soft.v).
+
+        weight_exp: integer k per symbol (broadcast over bits), the channel
+        power of that subcarrier relative to the training mean, rounded to
+        a power of two (Ofdm soft_llr_metric="thresh_w"). Measured in
+        examples/soft_metric_study.py: within noise of the full max-log +
+        exact |H|^2/noise weighting on AWGN and multipath, ~1.5-2 dB better
+        than an unweighted threshold metric (OpenOFDM style) on multipath.
+        """
+        xp = self.xp
+        y = symbols.get() if hasattr(symbols, "get") else np.asarray(symbols)   # host (cupy -> numpy)
+        if y.ndim == 1:
+            y = y[None, :]
+        pts, labels = self._point_table()
+        pts = np.asarray(pts)
+        norm2 = float(np.min(np.abs(np.unique(np.round(pts.real, 6)))) ** 2)
+        d = np.abs(y[..., None] - pts[None, None, :]) ** 2
+        m = self.bits_per_symbol
+        L = float(2 ** (int(llr_bits) - 1) - 1)
+        w = np.ldexp(1.0, np.asarray(weight_exp, dtype=np.int64))
+        out = np.empty(y.shape + (m,), dtype=np.float64)
+        for b in range(m):
+            t = (d[..., labels[:, b] == 0].min(-1) - d[..., labels[:, b] == 1].min(-1)) / norm2
+            out[..., b] = np.rint(np.clip(L * t * w / 4.0, -L, L))
+        soft = np.clip(np.rint(128.0 + 127.0 * out / L), 0, 255).astype("uint8")
+        return xp.asarray(soft.reshape(y.shape[0], -1))
+
     def demodulate_stats(self, symbols: Any) -> Tuple[Any, Any, Any]:
         """demodulate() plus the two per-row power sums EVM is built from:
         (bits, sum |symbol - nearest_point|^2, sum |nearest_point|^2), each

@@ -307,3 +307,34 @@ def test_soft_llr_scale_stream_decodes_and_matches_override():
     import pytest
     with pytest.raises(ValueError):
         Ofdm(fft_size=256, cp_len=32, n_data=216, n_pilot=8, soft_llr_scale="bogus")
+
+
+def test_soft_thresh_w_matches_definition_and_decodes():
+    """demodulate_soft_thresh is q = clip(round(7 t 2^k / 4), +/-7) with
+    t = (L1-L0)(2 xn - L0 - L1): check against a direct per-axis evaluation
+    on 16-QAM, and that Ofdm soft_llr_metric="thresh_w" decodes a frame."""
+    import numpy as np
+    from spectracuda.modem import Modem
+    from spectracuda.pipeline import Ofdm
+    m = Modem("qam16")
+    rng = np.random.default_rng(9)
+    y = (rng.normal(size=(2, 64)) + 1j * rng.normal(size=(2, 64))).astype(np.complex64) * 0.4
+    k = rng.integers(-3, 2, size=(2, 64))
+    got = (m.demodulate_soft_thresh(y, k).astype(int) - 128).reshape(2, 64, 4)
+    pts, labels = m._point_table()
+    norm = float(np.min(np.abs(np.unique(np.round(pts.real, 6)))))
+    for i in range(2):
+        for j in range(64):
+            for b in range(4):
+                d = np.abs(y[i, j] - pts) ** 2 / norm ** 2
+                t = d[labels[:, b] == 0].min() - d[labels[:, b] == 1].min()
+                q = int(np.rint(np.clip(7 * t * 2.0 ** k[i, j] / 4, -7, 7)))
+                assert got[i, j, b] == int(np.rint(127 * q / 7)), (i, j, b)
+    o = Ofdm(fft_size=256, cp_len=32, n_data=216, n_pilot=8, modem="qam16", fec1="conv_v27",
+             interleaver="block", interleaver_kwargs={"unit_bits": 8}, soft_llr_bits=4,
+             soft_llr_metric="thresh_w")
+    bits = np.random.default_rng(3).integers(0, 2, (1, 4000)).astype("uint8")
+    f = np.asarray(o.generate_frame(bits))
+    f = np.concatenate([np.zeros((1, 200), f.dtype), f, np.zeros((1, 200), f.dtype)], -1)
+    r = o.rx_process(f)
+    assert np.array_equal(np.asarray(r["bits"]).ravel()[:4000], bits.ravel())
