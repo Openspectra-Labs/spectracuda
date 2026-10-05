@@ -1,0 +1,243 @@
+
+
+================================================================
+== Synthesis Summary Report of 'sc_sync'
+================================================================
++ General Information: 
+    * Date:           Thu Sep 10 09:34:33 2026
+    * Version:        2025.2 (Build 6295257 on Nov 14 2025)
+    * Project:        sc_sync_proj
+    * Solution:       sol1 (Vivado IP Flow Target)
+    * Product family: artix7
+    * Target device:  xc7a50t-csg325-1
+    
+
+* Performance & Resource Estimates: 
++---------------------------+------+---------------+----------+---------+-------+----------+---------+-----------+------+--------+----------+------------+------------+-----+
+|          Modules          | Issue|               | Iteration|         |  Trip |          |       Latency       |      |        |          |            |            |     |
+|          & Loops          | Type | Violation Type|  Latency | Interval| Count | Pipelined| (cycles)|    (ns)   | Slack|  BRAM  |    DSP   |     FF     |     LUT    | URAM|
++---------------------------+------+---------------+----------+---------+-------+----------+---------+-----------+------+--------+----------+------------+------------+-----+
+|+ sc_sync                  |     -|              -|         -|   263497|      -|        no|   263496|  2.635e+06|  0.21|  2 (1%)|  26 (21%)|  9405 (14%)|  8081 (24%)|    -|
+| + sc_sync_Pipeline_SLIDE  |     -|              -|         -|        -|      -|       yes|   262211|  2.622e+06|  0.21|       -|  18 (15%)|  8061 (12%)|  6403 (19%)|    -|
+|  o SLIDE                  |     -|              -|        70|        4|  65536|       yes|   262209|  2.622e+06|  7.30|       -|         -|           -|           -|    -|
+| o PRIME                   |     -|              -|         2|        -|    256|        no|      512|  5.120e+03|  7.30|       -|         -|           -|           -|    -|
+| o INIT                    |     -|              -|         6|        -|    128|        no|      768|  7.680e+03|  7.30|       -|         -|           -|           -|    -|
++---------------------------+------+---------------+----------+---------+-------+----------+---------+-----------+------+--------+----------+------------+------------+-----+
+    Name Prefix: '+' for module, 'o' for loop, '*' for dataflow
+
+
+================================================================
+== HW Interfaces
+================================================================
+* S_AXILITE Interfaces
++---------------+------------+---------------+--------+----------+
+| Interface     | Data Width | Address Width | Offset | Register |
++---------------+------------+---------------+--------+----------+
+| s_axi_control | 32         | 6             | 16     | 0        |
++---------------+------------+---------------+--------+----------+
+
+* S_AXILITE Registers
++---------------+------------------+--------+-------+--------+----------------------------------+----------------------------------------------------------------------+
+| Interface     | Register         | Offset | Width | Access | Description                      | Bit Fields                                                           |
++---------------+------------------+--------+-------+--------+----------------------------------+----------------------------------------------------------------------+
+| s_axi_control | CTRL             | 0x00   | 32    | RW     | Control signals                  | 0=AP_START 1=AP_DONE 2=AP_IDLE 3=AP_READY 7=AUTO_RESTART 9=INTERRUPT |
+| s_axi_control | GIER             | 0x04   | 32    | RW     | Global Interrupt Enable Register | 0=Enable                                                             |
+| s_axi_control | IP_IER           | 0x08   | 32    | RW     | IP Interrupt Enable Register     | 0=CHAN0_INT_EN 1=CHAN1_INT_EN                                        |
+| s_axi_control | IP_ISR           | 0x0c   | 32    | RW     | IP Interrupt Status Register     | 0=CHAN0_INT_ST 1=CHAN1_INT_ST                                        |
+| s_axi_control | n_samples        | 0x10   | 32    | W      | Data signal of n_samples         |                                                                      |
+| s_axi_control | L                | 0x18   | 32    | W      | Data signal of L                 |                                                                      |
+| s_axi_control | best_d           | 0x20   | 32    | R      | Data signal of best_d            |                                                                      |
+| s_axi_control | best_d_ctrl      | 0x24   | 32    | R      | Control signal of best_d         | 0=best_d_ap_vld                                                      |
+| s_axi_control | best_metric      | 0x30   | 32    | R      | Data signal of best_metric       |                                                                      |
+| s_axi_control | best_metric_ctrl | 0x34   | 32    | R      | Control signal of best_metric    | 0=best_metric_ap_vld                                                 |
++---------------+------------------+--------+-------+--------+----------------------------------+----------------------------------------------------------------------+
+
+* AXIS
++-----------+-----------+---------------+-------+--------+--------+
+| Interface | Direction | Register Mode | TDATA | TREADY | TVALID |
++-----------+-----------+---------------+-------+--------+--------+
+| iq_in     | in        | both          | 32    | 1      | 1      |
++-----------+-----------+---------------+-------+--------+--------+
+
+* TOP LEVEL CONTROL
++-----------+------------+-----------+
+| Interface | Type       | Ports     |
++-----------+------------+-----------+
+| ap_clk    | clock      | ap_clk    |
+| ap_rst_n  | reset      | ap_rst_n  |
+| interrupt | interrupt  | interrupt |
+| ap_ctrl   | ap_ctrl_hs |           |
++-----------+------------+-----------+
+
+
+================================================================
+== SW I/O Information
+================================================================
+* Top Function Arguments
++-------------+-----------+-------------------------------------------------+
+| Argument    | Direction | Datatype                                        |
++-------------+-----------+-------------------------------------------------+
+| iq_in       | in        | stream<sc_iq_t, 0>&                             |
+| n_samples   | in        | int                                             |
+| L           | in        | int                                             |
+| best_d      | out       | int&                                            |
+| best_metric | out       | ap_fixed<24, 3, (ap_q_mode)5, (ap_o_mode)3, 0>& |
++-------------+-----------+-------------------------------------------------+
+
+* SW-to-HW Mapping
++-------------+---------------+-----------+--------------------------------------------+
+| Argument    | HW Interface  | HW Type   | HW Info                                    |
++-------------+---------------+-----------+--------------------------------------------+
+| iq_in       | iq_in         | interface |                                            |
+| n_samples   | s_axi_control | register  | name=n_samples offset=0x10 range=32        |
+| L           | s_axi_control | register  | name=L offset=0x18 range=32                |
+| best_d      | s_axi_control | register  | name=best_d offset=0x20 range=32           |
+| best_d      | s_axi_control | register  | name=best_d_ctrl offset=0x24 range=32      |
+| best_metric | s_axi_control | register  | name=best_metric offset=0x30 range=32      |
+| best_metric | s_axi_control | register  | name=best_metric_ctrl offset=0x34 range=32 |
++-------------+---------------+-----------+--------------------------------------------+
+
+
+================================================================
+== Bind Op Report
+================================================================
++--------------------------------------+-----+--------+--------------+--------+-----------+---------+
+| Name                                 | DSP | Pragma | Variable     | Op     | Impl      | Latency |
++--------------------------------------+-----+--------+--------------+--------+-----------+---------+
+| + sc_sync                            | 26  |        |              |        |           |         |
+|   icmp_ln47_fu_327_p2                |     |        | icmp_ln47    | setlt  | auto      | 0       |
+|   add_ln47_fu_332_p2                 |     |        | add_ln47     | add    | fabric    | 0       |
+|   w_1_fu_361_p2                      |     |        | w_1          | add    | fabric    | 0       |
+|   icmp_ln19_fu_406_p2                |     |        | icmp_ln19    | seteq  | auto      | 0       |
+|   w_2_fu_410_p3                      |     |        | w_2          | select | auto_sel  | 0       |
+|   icmp_ln59_fu_429_p2                |     |        | icmp_ln59    | setlt  | auto      | 0       |
+|   add_ln59_fu_434_p2                 |     |        | add_ln59     | add    | fabric    | 0       |
+|   mul_16s_16s_32_1_1_U36             | 1   |        | mul_ln64     | mul    | auto      | 0       |
+|   mul_16s_16s_32_1_1_U37             | 1   |        | mul_ln64_1   | mul    | auto      | 0       |
+|   add_ln64_2_fu_597_p2               |     |        | add_ln64_2   | add    | fabric    | 0       |
+|   add_ln64_fu_601_p2                 |     |        | add_ln64     | add    | fabric    | 0       |
+|   add_ln64_1_fu_619_p2               |     |        | add_ln64_1   | add    | fabric    | 0       |
+|   p_re_5_fu_750_p2                   |     |        | p_re_5       | add    | fabric    | 0       |
+|   mul_16s_16s_32_1_1_U38             | 1   |        | mul_ln65     | mul    | auto      | 0       |
+|   mac_mulsub_16s_16s_32s_32_4_1_U43  | 1   |        | mul_ln65_1   | mul    | dsp_slice | 3       |
+|   mac_mulsub_16s_16s_32s_32_4_1_U43  | 1   |        | sub_ln65     | sub    | dsp_slice | 3       |
+|   add_ln65_fu_766_p2                 |     |        | add_ln65     | add    | fabric    | 0       |
+|   p_im_5_fu_823_p2                   |     |        | p_im_5       | add    | fabric    | 0       |
+|   mul_16s_16s_32_1_1_U39             | 1   |        | mul_ln66     | mul    | auto      | 0       |
+|   mul_16s_16s_32_1_1_U40             | 1   |        | mul_ln66_1   | mul    | auto      | 0       |
+|   add_ln66_2_fu_649_p2               |     |        | add_ln66_2   | add    | fabric    | 0       |
+|   add_ln66_fu_653_p2                 |     |        | add_ln66     | add    | fabric    | 0       |
+|   add_ln66_1_fu_671_p2               |     |        | add_ln66_1   | add    | fabric    | 0       |
+|   r1_4_fu_792_p2                     |     |        | r1_4         | add    | fabric    | 0       |
+|   mul_16s_16s_32_1_1_U41             | 1   |        | mul_ln67     | mul    | auto      | 0       |
+|   mul_16s_16s_32_1_1_U42             | 1   |        | mul_ln67_1   | mul    | auto      | 0       |
+|   add_ln67_2_fu_701_p2               |     |        | add_ln67_2   | add    | fabric    | 0       |
+|   add_ln67_fu_705_p2                 |     |        | add_ln67     | add    | fabric    | 0       |
+|   add_ln67_1_fu_723_p2               |     |        | add_ln67_1   | add    | fabric    | 0       |
+|   r2_4_fu_800_p2                     |     |        | r2_4         | add    | fabric    | 0       |
+|   ia_1_fu_458_p2                     |     |        | ia_1         | add    | fabric    | 0       |
+|   icmp_ln19_1_fu_493_p2              |     |        | icmp_ln19_1  | seteq  | auto      | 0       |
+|   ia_2_fu_497_p3                     |     |        | ia_2         | select | auto_sel  | 0       |
+|   ib_1_fu_464_p2                     |     |        | ib_1         | add    | fabric    | 0       |
+|   icmp_ln19_2_fu_504_p2              |     |        | icmp_ln19_2  | seteq  | auto      | 0       |
+|   ib_2_fu_508_p3                     |     |        | ib_2         | select | auto_sel  | 0       |
+|  + sc_sync_Pipeline_SLIDE            | 18  |        |              |        |           |         |
+|    icmp_ln91_fu_407_p2               |     |        | icmp_ln91    | setlt  | auto      | 0       |
+|    d_fu_413_p2                       |     |        | d            | add    | fabric    | 0       |
+|    icmp_ln94_fu_419_p2               |     |        | icmp_ln94    | seteq  | auto      | 0       |
+|    mac_muladd_16s_16s_32s_33_4_1_U14 | 1   |        | mul_ln104    | mul    | dsp_slice | 3       |
+|    mul_16s_16s_32_1_1_U3             | 1   |        | mul_ln104_1  | mul    | auto      | 0       |
+|    mac_muladd_16s_16s_32s_33_4_1_U14 | 1   |        | sext_ln104_4 | sext   | dsp_slice | 3       |
+|    mac_muladd_16s_16s_32s_33_4_1_U14 | 1   |        | add_ln104    | add    | dsp_slice | 3       |
+|    mac_muladd_16s_16s_32s_33_4_1_U15 | 1   |        | mul_ln104_2  | mul    | dsp_slice | 3       |
+|    mul_16s_16s_32_1_1_U4             | 1   |        | mul_ln104_3  | mul    | auto      | 0       |
+|    mac_muladd_16s_16s_32s_33_4_1_U15 | 1   |        | sext_ln104_8 | sext   | dsp_slice | 3       |
+|    mac_muladd_16s_16s_32s_33_4_1_U15 | 1   |        | add_ln104_1  | add    | dsp_slice | 3       |
+|    sub_ln104_fu_730_p2               |     |        | sub_ln104    | sub    | fabric    | 0       |
+|    add_ln104_2_fu_826_p2             |     |        | add_ln104_2  | add    | fabric    | 0       |
+|    p_re_3_fu_845_p2                  |     |        | p_re_3       | add    | fabric    | 0       |
+|    mul_16s_16s_32_1_1_U5             | 1   |        | mul_ln105    | mul    | auto      | 0       |
+|    mac_mulsub_16s_16s_32s_32_4_1_U16 | 1   |        | mul_ln105_1  | mul    | dsp_slice | 3       |
+|    mac_mulsub_16s_16s_32s_32_4_1_U16 | 1   |        | sub_ln105    | sub    | dsp_slice | 3       |
+|    mul_16s_16s_32_1_1_U6             | 1   |        | mul_ln105_2  | mul    | auto      | 0       |
+|    mac_mulsub_16s_16s_32s_32_4_1_U17 | 1   |        | mul_ln105_3  | mul    | dsp_slice | 3       |
+|    mac_mulsub_16s_16s_32s_32_4_1_U17 | 1   |        | sub_ln105_1  | sub    | dsp_slice | 3       |
+|    sub_ln105_2_fu_885_p2             |     |        | sub_ln105_2  | sub    | fabric    | 0       |
+|    add_ln105_fu_937_p2               |     |        | add_ln105    | add    | fabric    | 0       |
+|    p_im_3_fu_956_p2                  |     |        | p_im_3       | add    | fabric    | 0       |
+|    mul_16s_16s_32_1_1_U11            | 1   |        | mul_ln107    | mul    | auto      | 0       |
+|    mul_16s_16s_32_1_1_U12            | 1   |        | mul_ln107_1  | mul    | auto      | 0       |
+|    add_ln107_1_fu_748_p2             |     |        | add_ln107_1  | add    | fabric    | 0       |
+|    add_ln107_fu_752_p2               |     |        | add_ln107    | add    | fabric    | 0       |
+|    mul_16s_16s_32_1_1_U7             | 1   |        | mul_ln108    | mul    | auto      | 0       |
+|    mul_16s_16s_32_1_1_U8             | 1   |        | mul_ln108_1  | mul    | auto      | 0       |
+|    add_ln108_1_fu_644_p2             |     |        | add_ln108_1  | add    | fabric    | 0       |
+|    add_ln108_fu_648_p2               |     |        | add_ln108    | add    | fabric    | 0       |
+|    e_mid_fu_680_p2                   |     |        | e_mid        | add    | fabric    | 0       |
+|    mul_16s_16s_32_1_1_U9             | 1   |        | mul_ln109    | mul    | auto      | 0       |
+|    mul_16s_16s_32_1_1_U10            | 1   |        | mul_ln109_1  | mul    | auto      | 0       |
+|    add_ln109_1_fu_692_p2             |     |        | add_ln109_1  | add    | fabric    | 0       |
+|    add_ln109_fu_696_p2               |     |        | add_ln109    | add    | fabric    | 0       |
+|    select_ln107_fu_785_p3            |     |        | select_ln107 | select | auto_sel  | 0       |
+|    add_ln110_fu_793_p2               |     |        | add_ln110    | add    | fabric    | 0       |
+|    add_ln111_1_fu_724_p2             |     |        | add_ln111_1  | add    | fabric    | 0       |
+|    i_out_1_fu_477_p2                 |     |        | i_out_1      | add    | fabric    | 0       |
+|    icmp_ln19_fu_483_p2               |     |        | icmp_ln19    | seteq  | auto      | 0       |
+|    i_out_2_fu_488_p3                 |     |        | i_out_2      | select | auto_sel  | 0       |
+|    i_mid_1_fu_496_p2                 |     |        | i_mid_1      | add    | fabric    | 0       |
+|    icmp_ln19_1_fu_502_p2             |     |        | icmp_ln19_1  | seteq  | auto      | 0       |
+|    i_mid_2_fu_507_p3                 |     |        | i_mid_2      | select | auto_sel  | 0       |
+|    i_in_1_fu_453_p2                  |     |        | i_in_1       | add    | fabric    | 0       |
+|    icmp_ln19_2_fu_515_p2             |     |        | icmp_ln19_2  | seteq  | auto      | 0       |
+|    i_in_2_fu_519_p3                  |     |        | i_in_2       | select | auto_sel  | 0       |
+|    add_ln124_fu_910_p2               |     |        | add_ln124    | add    | fabric    | 0       |
+|    mul_24s_24s_46_1_1_U1             | 2   |        | mul_ln126    | mul    | auto      | 0       |
+|    mul_24s_24s_46_1_1_U1             | 2   |        | mul_ln126_1  | mul    | auto      | 0       |
+|    num_fu_1019_p2                    |     |        | num          | add    | fabric    | 0       |
+|    mul_24s_24s_46_1_1_U2             | 2   |        | mul_ln127    | mul    | auto      | 0       |
+|    icmp_ln133_fu_1014_p2             |     |        | icmp_ln133   | setgt  | auto      | 0       |
+|    sdiv_52ns_37ns_19_56_1_U13        |     |        | sdiv_ln134   | sdiv   | auto      | 55      |
+|    icmp_ln137_fu_1057_p2             |     |        | icmp_ln137   | setgt  | auto      | 0       |
+|    or_ln137_fu_1063_p2               |     |        | or_ln137     | or     | auto      | 0       |
+|    bm_2_fu_1068_p3                   |     |        | bm_2         | select | auto_sel  | 0       |
+|    bd_4_fu_1076_p3                   |     |        | bd_4         | select | auto_sel  | 0       |
++--------------------------------------+-----+--------+--------------+--------+-----------+---------+
+
+
+================================================================
+== Storage Report
+================================================================
++-------------------+-----------+-----------+------+------+--------+----------+------+---------+------------------+
+| Name              | Usage     | Type      | BRAM | URAM | Pragma | Variable | Impl | Latency | Bitwidth, Depth, |
+|                   |           |           |      |      |        |          |      |         | Banks            |
++-------------------+-----------+-----------+------+------+--------+----------+------+---------+------------------+
+| + sc_sync         |           |           | 2    | 0    |        |          |      |         |                  |
+|   control_s_axi_U | interface | s_axilite |      |      |        |          |      |         |                  |
+|   buf_i_U         | ram_2p    |           | 1    |      | pragma | buf_i    | bram | 1       | 16, 257, 1       |
+|   buf_q_U         | ram_2p    |           | 1    |      | pragma | buf_q    | bram | 1       | 16, 257, 1       |
++-------------------+-----------+-----------+------+------+--------+----------+------+---------+------------------+
+
+
+================================================================
+== Pragma Report
+================================================================
+* Valid Pragma Syntax
++----------------+--------------------------------------+---------------------------------+
+| Type           | Options                              | Location                        |
++----------------+--------------------------------------+---------------------------------+
+| INLINE         |                                      | in bump (src/sc_sync.cpp:17)    |
+| INTERFACE      | axis port=iq_in                      | in sc_sync (src/sc_sync.cpp:29) |
+| INTERFACE      | s_axilite port=n_samples             | in sc_sync (src/sc_sync.cpp:30) |
+| INTERFACE      | s_axilite port=L                     | in sc_sync (src/sc_sync.cpp:31) |
+| INTERFACE      | s_axilite port=best_d                | in sc_sync (src/sc_sync.cpp:32) |
+| INTERFACE      | s_axilite port=best_metric           | in sc_sync (src/sc_sync.cpp:33) |
+| INTERFACE      | s_axilite port=return                | in sc_sync (src/sc_sync.cpp:34) |
+| BIND_STORAGE   | variable=buf_i type=ram_2p impl=bram | in sc_sync (src/sc_sync.cpp:38) |
+| BIND_STORAGE   | variable=buf_q type=ram_2p impl=bram | in sc_sync (src/sc_sync.cpp:39) |
+| LOOP_TRIPCOUNT | min=256 max=256                      | in sc_sync (src/sc_sync.cpp:48) |
+| LOOP_TRIPCOUNT | min=128 max=128                      | in sc_sync (src/sc_sync.cpp:60) |
+| LOOP_TRIPCOUNT | min=1 max=65536                      | in sc_sync (src/sc_sync.cpp:92) |
+| PIPELINE       | ii=4                                 | in sc_sync (src/sc_sync.cpp:93) |
++----------------+--------------------------------------+---------------------------------+
+
+

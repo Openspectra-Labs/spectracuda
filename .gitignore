@@ -45,3 +45,11 @@ venv/
 # Sphinx build output (spectracuda.readthedocs.io builds this itself) --
 # regenerate locally with `.venv/bin/python -m sphinx -b html docs docs/_build/html`.
 /docs/_build/
+
+# FPGA: build output (fpga/build/ is covered by build/ above), pinned Python
+# reference worktrees (created by fpga/sim/setup_ref.sh), Vivado scratch
+/fpga/refs/
+.Xil/
+vivado*.jou
+vivado*.log
+xvlog.pb
