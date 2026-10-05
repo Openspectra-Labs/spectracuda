@@ -43,14 +43,17 @@ module tx_freq_domain #(
  wire legal_n=in_n==1||in_n==2||in_n==4||in_n==6;
  assign in_ready=!rst&&!full[wrbank];
  wire accept=in_valid&&in_ready;
- wire item_err=in_sc!=expect_sc || (in_stype!=0&&in_stype!=1&&in_stype!=3) ||
-          (in_stype==0 ? (in_n!=0||in_sc!=0) : !legal_n) ||
+ // TRAIN (0) and DMRS (4) are single n=0 tokens and both carry the
+ // training grid (a DMRS IS the training symbol re-sent, framing/dmrs.py).
+ wire is_ref=in_stype==0||in_stype==4;
+ wire item_err=in_sc!=expect_sc || (in_stype!=0&&in_stype!=1&&in_stype!=3&&in_stype!=4) ||
+          (is_ref ? (in_n!=0||in_sc!=0) : !legal_n) ||
           (in_stype==1&&in_n!=1) ||
           (in_frame_end&&(in_stype!=3||in_sc!=215));
  wire meta_err=expect_sc!=0 && (sym[wrbank]!=in_sym_idx || stype[wrbank]!=in_stype ||
           fq[wrbank]!=in_fseq || nbits[wrbank]!=in_n || in_frame_start);
  wire load=!out_valid||out_ready;
- wire [31:0] bin_value=stype[rdbank]==0 ? training[next_bin] :
+ wire [31:0] bin_value=(stype[rdbank]==0||stype[rdbank]==4) ? training[next_bin] :
      (kind[next_bin]==0 ? 32'd0 :
       (kind[next_bin]==2 ? 32'h40000000 : mapped[{rdbank,next_bin}]));
  always @(posedge clk) begin
@@ -71,9 +74,9 @@ module tx_freq_domain #(
          fq[wrbank]<=in_fseq;fs[wrbank]<=in_frame_start;
          nbits[wrbank]<=in_n;bad[wrbank]<=item_err;
        end else if(item_err||meta_err) bad[wrbank]<=1;
-       if(in_stype!=0&&in_sc<=215)
+       if(!is_ref&&in_sc<=215)
          mapped[{wrbank,data_bin[in_sc]}]<=mapper[{map_group,in_bits}];
-       if(in_stype==0||in_sc==215) begin
+       if(is_ref||in_sc==215) begin
          full[wrbank]<=1;fe[wrbank]<=in_frame_end;wrbank<=!wrbank;expect_sc<=0;
        end else expect_sc<=expect_sc+1;
      end

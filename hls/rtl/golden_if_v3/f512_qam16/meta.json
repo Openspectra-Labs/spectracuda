@@ -1,0 +1,13 @@
+{
+ "cfg_encoded_bits": 1036,
+ "cfg_di_units": 64,
+ "cfg_di_rows": 9,
+ "cfg_di_cols": 8,
+ "bits": 512,
+ "modem": "qam16",
+ "dmrs_interval": 0,
+ "cfo": 0.0,
+ "snr": null,
+ "python_ref": "dc8b882",
+ "rtl_matches_python": true
+}

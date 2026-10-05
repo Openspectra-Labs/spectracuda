@@ -24,9 +24,9 @@ module rx_bit_domain_tb;
 `ifndef TB_LLR_W
 `define TB_LLR_W 1
 `endif
-    // LLR_W = 4: the reference's hard bits are fed as +/-7 LLRs. With equal
-    // magnitudes the soft metric is an order-preserving affine map of the
-    // hard one, so the bytes must equal the hard reference exactly.
+    // The i2 fixture carries 4-bit signed LLRs (v3 soft chain, > 0 = bit 0;
+    // the old hard fixtures carry 0 / -1). LLR_W = 4 feeds them as they
+    // are; LLR_W = 1 feeds their sign.
     localparam integer LLR_W = `TB_LLR_W;
 `ifndef TB_IL2
 `define TB_IL2 0
@@ -81,7 +81,7 @@ module rx_bit_domain_tb;
 
     // ---------------- files ----------------
     reg [1:0] i_fq [0:MAXI-1]; reg [7:0] i_sym [0:MAXI-1], i_sc [0:MAXI-1];
-    reg [2:0] i_st [0:MAXI-1], i_n [0:MAXI-1]; reg [5:0] i_llr [0:MAXI-1];
+    reg [2:0] i_st [0:MAXI-1], i_n [0:MAXI-1]; reg [23:0] i_llr [0:MAXI-1];
     reg [3:0] i_mk [0:MAXI-1];
     integer ni = 0;
     reg [7:0] o_b [0:MAXO-1]; reg o_l [0:MAXO-1]; reg [1:0] o_fq [0:MAXO-1];
@@ -102,7 +102,7 @@ module rx_bit_domain_tb;
                             a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14);
                 if (r == 15) begin
                     i_fq[ni] = a0; i_sym[ni] = a1; i_sc[ni] = a2; i_st[ni] = a3; i_n[ni] = a4;
-                    i_llr[ni] = {a10[0], a9[0], a8[0], a7[0], a6[0], a5[0]};
+                    i_llr[ni] = {a10[3:0], a9[3:0], a8[3:0], a7[3:0], a6[3:0], a5[3:0]};
                     i_mk[ni] = {a11[0], a12[0], a13[0], a14[0]};
                     ni = ni + 1;
                 end
@@ -213,11 +213,13 @@ module rx_bit_domain_tb;
             in_fseq = i_fq[k]; in_sym = i_sym[k]; in_sc = i_sc[k]; in_stype = i_st[k];
             in_n = i_n[k];
             begin : mk_llr
-                integer b; reg [5:0] hb;
-                hb = (i_st[k] == 1 && corrupt) ? ~i_llr[k] & 6'b000001 : i_llr[k];
+                integer b; reg [23:0] v;
+                v = i_llr[k];
+                // corrupt mode: flip the header's bit (negate its LLR)
+                if (i_st[k] == 1 && corrupt) v[3:0] = (v[3] ? 4'd7 : 4'b1001);
                 for (b = 0; b < 6; b = b + 1)
-                    if (LLR_W == 1) in_llr[b] = hb[b];
-                    else            in_llr[b*LLR_W +: LLR_W] = (b < i_n[k]) ? (hb[b] ? -7 : 7) : 0;
+                    if (LLR_W == 1) in_llr[b] = (b < i_n[k]) ? v[4*b+3] : 1'b0;
+                    else            in_llr[b*LLR_W +: LLR_W] = (b < i_n[k]) ? v[4*b +: 4] : 4'd0;
             end
             {in_ss, in_se, in_fs, in_fe} = i_mk[k];
         end

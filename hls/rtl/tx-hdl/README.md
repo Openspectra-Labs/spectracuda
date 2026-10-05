@@ -1,40 +1,38 @@
-# Standalone frozen-format TX HDL
+# TX HDL -- v3 frame format
 
-Initial implementation: **TX_BIT 125 MHz → asynchronous stream → TX_FD
-100 MHz → TX_TD 100 MHz**. TX processing hardware and IFFT are independent
-of RX. All work and generated artifacts live in this directory.
+**TX_BIT 125 MHz → asynchronous stream → TX_FD 100 MHz → TX_TD 100 MHz**.
+Format = the pinned Python reference `hls/rtl/golden_ref_v3.py` (protected
+header, interleaver2, DMRS, hard decision); the RX in `../src` decodes the
+same format.
 
-Implemented:
-
-- `src/tx_bit_domain.v`: two committed byte-packet banks (next frame captured
-  while the current one is encoded), frozen PHY header,
-  outer byte interleaver, rate-1/2 K=7 convolutional coding, six tail bits,
-  symbol padding and metadata-bearing coded groups.
+- `src/tx_bit_domain.v`: two packet banks; v3 header (14 info bytes + crc16
+  -> conv_v27 + tail -> scramble -> 268 of 432 slots over 2 BPSK symbols);
+  outer byte interleaver, conv_v27 + tail, padding filler; interleaver2 per
+  symbol (ping-pong bit buffers, 2 bits/clock column-major read); DMRS
+  tokens (stype 4) after every 16/32/64 data symbols, trailing one
+  suppressed (spectracuda framing/dmrs.py).
 - `src/tx_stream_cdc.v`: 32-entry asynchronous coded-group FIFO, registered
   read side.
-- `src/tx_freq_domain.v`: mapper and two resource-grid banks, training,
-  header/data placement, fixed pilots and nulls.
-- `src/tx_time_domain.v`, `src/tx_ifft_engine.v`: buffered inverse transform,
-  quantization, CP, preamble and sample scheduling.
+- `src/tx_freq_domain.v`: mapper and two resource-grid banks; TRAIN and DMRS
+  tokens both produce the training grid; pilots and nulls.
+- `src/tx_time_domain.v`, `src/tx_ifft_engine.v`: IFFT (registered output),
+  quantization, CP, preamble, three time banks, frame-cut recovery.
 - `src/tx_top.v`: domain instances and explicit connections.
 
-See [INTERFACES.md](INTERFACES.md) for the actual contract. The initial profile
-is the RX regression format at Python `ad0a396`: CRC none, RS none, byte outer
-interleaver, conv_v27, QPSK/16QAM/64QAM payload, uncoded BPSK header. Payload
-CRC/RS and MAC remain host responsibilities; other profiles are not supported.
-Protected header, inner interleaver2 and DMRS are later format changes.
+See [INTERFACES.md](INTERFACES.md) for the contract. Payload CRC/RS and
+MAC remain host responsibilities; C2 regions are not supported.
 
 From this directory, run:
 
 ```sh
-../../../.venv/bin/python -B run_bit_tests.py
-../../../.venv/bin/python -B run_freq_tests.py
-../../../.venv/bin/python -B run_top_tests.py   # normal, forced underrun, bad symbol
-../../../.venv/bin/python -B run_loopback.py    # TX RTL -> RX RTL (../src), bytes back exact
-./run_top_xsim.sh                               # same 3 top scenarios on the REAL xfft netlist
+../../../.venv/bin/python -B run_tx_v3.py      # 8 frames vs pinned Python (all ROMs regenerated),
+                                               # + forced underrun + bad symbol, + Python RX on RTL output
+../../../.venv/bin/python -B run_freq_tests.py # FD alone, incl. bad-symbol injection
+../../../.venv/bin/python -B run_loopback.py   # TX RTL -> RX RTL (../src), bytes back exact
+./run_top_xsim.sh                              # newest run_tx_v3 fixtures on the REAL xfft netlist
 ```
 
-The runners verify the pinned worktree in `../build/spectracuda_ref`, generate
+The runners verify the pinned worktree (`../golden_ref_v3.py`), generate
 local vectors and save revision hashes, compiler logs and results under local
 `build/<run-id>/`. They require NumPy and Verilator. Top-level simulation uses
 `tb/tx_xfft_256_model.v`, a floating inverse-DFT model, **not** the vendor's

@@ -62,9 +62,16 @@ module mmse_eq #(
     output reg  signed [W-1:0]     y_re,
     output reg  signed [W-1:0]     y_im,
     output reg                     y_valid,
-    output reg  [META_W-1:0]       y_meta
+    output reg  [META_W-1:0]       y_meta,
+    // |H|^2 of the estimate this item was equalized with (Q24, unsigned),
+    // aligned with y. The soft demapper weights each subcarrier's LLRs by
+    // it (spectracuda Ofdm: w = |H[k]|^2 / normalizer -- a faded carrier's
+    // bits must arrive less trusted). It is e1_hh_re + e1_hh_im, already
+    // computed here for the MMSE denominator, so it costs only registers.
+    output reg  [2*W-1:0]          y_hh
 );
     reg [META_W-1:0] e1_m, e2_m, e3_m, e4_m, e5_m;
+    reg [2*W-1:0]    e2_hh, e3_hh, e4_hh, e5_hh;   // |H|^2 riding beside y
 
     localparam integer LUT_N  = 1 << `EQ_LUT_BITS;
     localparam integer EXP_W  = 6;
@@ -130,6 +137,7 @@ module mmse_eq #(
 
             // e2: rx * conj(H) = (rr + ii) + j(ir - ri)
             e2_den    <= e1_hh_re + e1_hh_im + `EQ_NOISE_VAR_Q24;
+            e2_hh     <= e1_hh_re + e1_hh_im;
             e2_num_re <= e1_rr + e1_ii;
             e2_num_im <= e1_ir - e1_ri;
             e2_v      <= e1_v;
@@ -142,6 +150,7 @@ module mmse_eq #(
             e3_num_im <= e2_num_im;
             e3_v      <= e2_v;
             e3_m      <= e2_m;
+            e3_hh     <= e2_hh;
 
             // e4
             e4_recip  <= recip_rom[e3_idx];
@@ -150,6 +159,7 @@ module mmse_eq #(
             e4_num_im <= e3_num_im;
             e4_v      <= e3_v;
             e4_m      <= e3_m;
+            e4_hh     <= e3_hh;
 
             // e5
             e5_re  <= e4_num_re * $signed({1'b0, e4_recip});
@@ -157,12 +167,14 @@ module mmse_eq #(
             e5_exp <= e4_exp;
             e5_v   <= e4_v;
             e5_m   <= e4_m;
+            e5_hh  <= e4_hh;
 
             // e6
             y_re    <= (e5_re >>> (`EQ_OUT_SHIFT + e5_exp));
             y_im    <= (e5_im >>> (`EQ_OUT_SHIFT + e5_exp));
             y_valid <= e5_v;
             y_meta  <= e5_m;
+            y_hh    <= e5_hh;
         end
     end
     /* verilator lint_on WIDTHTRUNC */

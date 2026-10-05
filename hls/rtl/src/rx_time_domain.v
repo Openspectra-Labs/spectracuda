@@ -161,6 +161,7 @@ module rx_time_domain #(
     // ---------------------------------------------------------------
     localparam [2:0] PH_IDLE = 3'd0, PH_PRE = 3'd1, PH_TRAIN = 3'd2,
                      PH_HDR  = 3'd3, PH_PAY = 3'd4;
+    localparam integer N_HDR_SYMS = `HDR_TOTAL_SLOTS / `N_DATA;
     reg [2:0] phase;
     reg [15:0] ph_cnt;      // samples within the current phase
     reg [7:0]  slot_idx;    // slots consumed in this phase
@@ -187,8 +188,12 @@ module rx_time_domain #(
                     phase <= PH_HDR; slot_idx <= 8'd0;
                 end else slot_idx <= slot_idx + 1'b1;
             end else ph_cnt <= ph_cnt + 1'b1;
+            // v3 protected header: HDR_TOTAL_SLOTS / N_DATA symbols (2)
             PH_HDR: if (slot_last) begin
-                ph_cnt <= 16'd0; slot_idx <= 8'd0; phase <= PH_PAY;
+                ph_cnt <= 16'd0;
+                if (slot_idx == 8'(N_HDR_SYMS - 1)) begin
+                    slot_idx <= 8'd0; phase <= PH_PAY;
+                end else slot_idx <= slot_idx + 1'b1;
             end else ph_cnt <= ph_cnt + 1'b1;
             PH_PAY: if (slot_last) begin
                 ph_cnt <= 16'd0;

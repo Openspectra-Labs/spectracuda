@@ -2,7 +2,7 @@
 module tx_top_tb;
  reg clkbit=0,clk=0;always #4 clkbit=~clkbit;always #5 clk=~clk;
  reg arst=1,ce=0,cv=0,iv=0,last=0;
- reg[15:0] len=0;reg[2:0] modcode=0;reg[63:0] userword=0;reg[1:0] frame=0;
+ reg[15:0] len=0;reg[2:0] modcode=0;reg[47:0] userword=0;reg[1:0] frame=0,dmrscode=0;
  reg[7:0] byte_in=0;
  wire cr,ir,valid,active,fs,fe,bdone,be,ferr,seqerr,under,clipped,ifterr;
  wire signed[15:0] re,im;wire[1:0] fq;wire[15:0] aborts;
@@ -19,7 +19,7 @@ module tx_top_tb;
  reg signed[15:0] ei[0:150000],eq[0:150000];reg[1:0] eframe[0:150000];
  reg efs[0:150000],efe[0:150000];
  tx_top dut(.clk_bit(clkbit),.clk_sample(clk),.arst(arst),.sample_ce(ce),
-   .cfg_valid(cv),.cfg_ready(cr),.cfg_payload_bits(len),.cfg_mod(modcode),
+   .cfg_valid(cv),.cfg_ready(cr),.cfg_payload_bits(len),.cfg_mod(modcode),.cfg_dmrs(dmrscode),
    .cfg_user(userword),.cfg_fseq(frame),.in_valid(iv),.in_ready(ir),.in_byte(byte_in),.in_last(last),
    .out_valid(valid),.out_i(re),.out_q(im),.out_active(active),.out_frame_start(fs),.out_frame_end(fe),
    .out_fseq(fq),.bit_done(bdone),.st_bit_error(be),.st_freq_error(ferr),
@@ -67,11 +67,11 @@ module tx_top_tb;
    repeat(12) @(negedge clkbit);arst=0;
    repeat(5) @(negedge clkbit);
    while(!$feof(fd)) begin
-     rc=$fscanf(fd,"%d %d %h %d %d\n",a,b,userword,c,nb);
-     if(rc==5) begin
+     rc=$fscanf(fd,"%d %d %h %d %d %d\n",a,b,userword,c,nb,d);
+     if(rc==6) begin
        @(negedge clkbit);
        while(!cr) @(negedge clkbit);
-       cv=1;len=16'(a);modcode=3'(b);frame=2'(c);@(negedge clkbit);cv=0;
+       cv=1;len=16'(a);modcode=3'(b);frame=2'(c);dmrscode=2'(d);@(negedge clkbit);cv=0;
        for(i=0;i<nb;i=i+1) begin
          rc=$fscanf(fd,"%d\n",a);if(rc!=1) $fatal(1,"payload");
          while(!ir) @(negedge clkbit);

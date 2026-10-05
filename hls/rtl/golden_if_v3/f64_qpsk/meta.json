@@ -1,0 +1,13 @@
+{
+ "cfg_encoded_bits": 140,
+ "cfg_di_units": 8,
+ "cfg_di_rows": 3,
+ "cfg_di_cols": 3,
+ "bits": 64,
+ "modem": "qpsk",
+ "dmrs_interval": 0,
+ "cfo": 0.0,
+ "snr": null,
+ "python_ref": "dc8b882",
+ "rtl_matches_python": true
+}

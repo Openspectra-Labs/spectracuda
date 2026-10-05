@@ -55,14 +55,15 @@
             $fwrite(cap_i1, "%0d %0d %0d %0d %0d %0d\n", dut.i1_fseq, dut.i1_sym,
                     dut.fft_bin, dut.fft_stype, $signed(dut.fft_re), $signed(dut.fft_im));
 
-        // ---- I2: accepted FD -> BIT transfers (LLR_W = 1: 0 or -1) ----
+        // ---- I2: accepted FD -> BIT transfers, 4-bit signed LLRs
+        //      (rx_top LLR_W = 4; > 0 means bit 0, header items are +/-7) ----
         if (dut.fd_out_valid && dut.fd_out_ready)
             $fwrite(cap_i2, "%0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d\n",
                     dut.fd_out_fseq, dut.fd_out_sym_idx, dut.fd_out_sc,
                     dut.fd_out_stype, dut.fd_out_n,
-                    dut.fd_out_llr[0] ? -1 : 0, dut.fd_out_llr[1] ? -1 : 0,
-                    dut.fd_out_llr[2] ? -1 : 0, dut.fd_out_llr[3] ? -1 : 0,
-                    dut.fd_out_llr[4] ? -1 : 0, dut.fd_out_llr[5] ? -1 : 0);
+                    $signed(dut.fd_out_llr[3:0]),   $signed(dut.fd_out_llr[7:4]),
+                    $signed(dut.fd_out_llr[11:8]),  $signed(dut.fd_out_llr[15:12]),
+                    $signed(dut.fd_out_llr[19:16]), $signed(dut.fd_out_llr[23:20]));
     end
 
     // ---- C1: what the header produced, once per run ----
@@ -77,7 +78,7 @@
                 $fwrite(cap_c1, "cfg_crc %0d\n", dut.crc_code);
                 $fwrite(cap_c1, "cfg_fec0 %0d\n", dut.fec0_code);
                 $fwrite(cap_c1, "cfg_fec1 %0d\n", dut.fec1_code);
-                $fwrite(cap_c1, "cfg_c2_syms 0\ncfg_dmrs_period 0\n");
+                $fwrite(cap_c1, "cfg_c2_syms 0\ncfg_dmrs_period %0d\n", dut.cfg_dmrs_period);
                 $fclose(cap_i1); $fclose(cap_i2); $fclose(cap_c1);
             end
         end

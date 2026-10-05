@@ -788,10 +788,29 @@ bit-exact. No algorithm, width or rounding changes until step 6 is done.
    resets. `tb_rx_time_domain` (Verilator + xsim).
 6. Full regression; per-stage equivalence vs frozen RTL; Vivado timing
    (margin is small) and utilization delta.
-7. New header format (descramble, conv 1/2, CRC-16, `dmrs_period`) in BD,
-   verified on its own. Python reference moves to current `main` for the
-   header.
-8. DMRS in FD.
+7. ✅ New header format (descramble, conv 1/2, CRC-16, `dmrs_period`) in BD,
+   verified on its own. Python reference moves to `hls/rtl/golden_ref_v3.py`
+   (pinned 65f5be9): `header_decode_v3.v` = select 268 of 432 slots (2 BPSK
+   symbols) -> descramble -> private hard `viterbi_dec` (134 steps) -> crc16
+   -> fields; `fields_valid` needs the crc AND known codes. TD tags
+   `HDR_TOTAL_SLOTS / N_DATA` = 2 header symbols. IL2 now on (`IL2 = 1`).
+   `run_header_v3.py`: 60/60 incl. 3-bit-error headers corrected and
+   corrupted ones rejected.
+8. ✅ DMRS in FD. Body ordinal j is DMRS iff (j+1) mod (interval+1) == 0
+   (`t_dmrs` per fseq from C1). DMRS bins take the TRAIN path into
+   `ls_chanest` and rewrite the H store (data and pilot bins), exactly as
+   Python re-runs its training estimator per DMRS. **One H bank, not
+   ping-pong**: the equalizers sample H when an item enters them, and every
+   earlier data symbol has already entered, so only the data symbol AFTER a
+   DMRS must wait -- it is held in B1 (`dmrs_pend`) until the refreshed H is
+   complete. BD's config publisher counts `cfg_body_syms = n_data +
+   (n_data-1)/interval` (trailing DMRS suppressed) and rejects data+DMRS >
+   128 and any C2 region. Gates: `run_frame_v3.py` 10/10 (CFO, AWGN 15-35 dB,
+   C = 1/2.5/5/10, DMRS off/16/32/64; RTL bytes == Python's decode),
+   TX RTL -> RX RTL loopback (`tx-hdl/run_loopback.py`), FD/BD stage suites
+   on `golden_if_v3/` (`capture_golden_v3.py`). The old-format flows
+   (`run_frame.py`, `rate_matrix.sh`, `golden_if/`) describe the
+   pre-v3 RTL and no longer apply to it.
 
 Expected latency changes (data values unchanged): B1 and B2 each add a few
 pipeline cycles. Nothing in the design depends on absolute latency after

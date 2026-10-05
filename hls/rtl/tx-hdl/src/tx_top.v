@@ -4,7 +4,7 @@
 module tx_top(
  input wire clk_bit,clk_sample,arst,sample_ce,
  input wire cfg_valid,output wire cfg_ready,input wire[15:0] cfg_payload_bits,
- input wire[2:0] cfg_mod,input wire[63:0] cfg_user,input wire[1:0] cfg_fseq,
+ input wire[2:0] cfg_mod,input wire[1:0] cfg_dmrs,input wire[47:0] cfg_user,input wire[1:0] cfg_fseq,
  input wire in_valid,output wire in_ready,input wire[7:0] in_byte,input wire in_last,
  output wire out_valid,output wire signed[15:0] out_i,out_q,
  output wire out_active,out_frame_start,out_frame_end,output wire[1:0] out_fseq,
@@ -20,7 +20,7 @@ module tx_top(
  wire bv,ready,cvalid,cready;wire[31:0] bitem,citem;
  tx_bit_domain bit_domain(.clk_bit(clk_bit),.rst(br[1]),
    .cfg_valid(cfg_valid),.cfg_ready(cfg_ready),.cfg_payload_bits(cfg_payload_bits),
-   .cfg_mod(cfg_mod),.cfg_user(cfg_user),.cfg_fseq(cfg_fseq),.in_valid(in_valid),
+   .cfg_mod(cfg_mod),.cfg_dmrs(cfg_dmrs),.cfg_user(cfg_user),.cfg_fseq(cfg_fseq),.in_valid(in_valid),
    .in_ready(in_ready),.in_byte(in_byte),.in_last(in_last),
    .out_valid(bv),.out_ready(ready),.out_bits(bitem[5:0]),.out_n(bitem[8:6]),
    .out_sc(bitem[16:9]),.out_sym_idx(bitem[24:17]),.out_stype(bitem[27:25]),

@@ -91,7 +91,7 @@ module rx_freq_domain #(
     input  wire [2:0]               cfg_mod,       // header mod_scheme code
     input  wire [7:0]               cfg_body_syms,
     input  wire [7:0]               cfg_c2_syms,   // must be 0 until C2 exists
-    input  wire [1:0]               cfg_dmrs_period, // must be 0 until DMRS exists
+    input  wire [1:0]               cfg_dmrs_period, // header dmrs_period code (0 off, 1/2/3 = 16/32/64)
 
     // ---- FD -> BIT: one LLR group (one subcarrier) per transfer ----
     output wire                     out_valid,
@@ -145,6 +145,7 @@ module rx_freq_domain #(
     reg        t_hdr  [0:3];     // this frame's header has left (into B2)
     reg  [7:0] t_body [0:3];
     reg  [1:0] t_dm   [0:3];     // demapper scheme for its DATA
+    reg  [1:0] t_dmrs [0:3];     // dmrs_period code
 
     // header mod_scheme code -> demapper code (bpsk0 qpsk1 qam16_2 qam64_3
     // -> qpsk0 qam16_1 qam64_2); payload BPSK falls back to QPSK, exactly
@@ -162,7 +163,7 @@ module rx_freq_domain #(
             st_cfg_unsupported <= 1'b0;
             for (k = 0; k < 4; k = k + 1) begin
                 t_ok[k] <= 1'b0; t_bad[k] <= 1'b0; t_hdr[k] <= 1'b0;
-                t_body[k] <= 8'd0; t_dm[k] <= DMQ;
+                t_body[k] <= 8'd0; t_dm[k] <= DMQ; t_dmrs[k] <= 2'd0;
             end
         end else begin
             cfg_valid_q <= cfg_valid; cfg_err_q <= cfg_err; cfg_fseq_q <= cfg_fseq;
@@ -175,7 +176,8 @@ module rx_freq_domain #(
                 t_ok[cfg_fseq]   <= 1'b1;
                 t_body[cfg_fseq] <= cfg_body_syms;
                 t_dm[cfg_fseq]   <= cfg_dm;
-                if (cfg_c2_syms != 8'd0 || cfg_dmrs_period != 2'd0)
+                t_dmrs[cfg_fseq] <= cfg_dmrs_period;
+                if (cfg_c2_syms != 8'd0)
                     st_cfg_unsupported <= 1'b1;
             end
             if (err_evt) t_bad[cfg_fseq] <= 1'b1;
@@ -218,11 +220,35 @@ module rx_freq_domain #(
     wire       body_go   = t_bad[h1_fq] || (t_ok[h1_fq] && t_hdr[h1_fq]);
     wire       hdr_go    = h_done && (h_fseq == h1_fq);
 
-    assign b1_pop = b1_hv && (is_train || (is_hdr && hdr_go) || (is_body && body_go));
+    // ---- body classifier: DATA / DMRS (spectracuda framing/dmrs.py) ----
+    // A DMRS follows every `interval` data symbols, the trailing one is
+    // suppressed (cfg_body_syms simply doesn't include it), so body
+    // ordinal j is DMRS iff j mod (interval+1) == interval. B1 releases a
+    // frame's body symbols in order, so j mod (interval+1) is kept as a
+    // counter (seg_pos) instead of a modulo in the release path: it
+    // restarts on the frame's TRAIN and steps on each body symbol's last bin.
+    reg  [6:0] seg_pos;
+    wire [6:0] seg_last = (t_dmrs[h1_fq] == 2'd1) ? 7'd16 :
+                          (t_dmrs[h1_fq] == 2'd2) ? 7'd32 : 7'd64;
+    wire       h1_dmrs   = is_body && t_dmrs[h1_fq] != 2'd0 && seg_pos == seg_last;
+    always @(posedge clk) begin
+        if (rst) seg_pos <= 7'd0;
+        else if (b1_pop && is_train) seg_pos <= 7'd0;
+        else if (b1_pop && is_body && h1_bin == 8'd255)
+            seg_pos <= (seg_pos == seg_last) ? 7'd0 : seg_pos + 7'd1;
+    end
+    // The data symbol after a DMRS must be equalized against the REFRESHED
+    // H: it waits in B1 until that estimate is complete. (The equalizers
+    // read H as an item enters them and every earlier data symbol has
+    // already entered, so one H bank is enough.)
+    reg        dmrs_pend;
+    wire       dmrs_wait = dmrs_pend && is_body && !h1_dmrs && !t_bad[h1_fq];
+
+    assign b1_pop = b1_hv && (is_train || (is_hdr && hdr_go) || (is_body && body_go && !dmrs_wait));
 
     wire       body_fwd  = !t_bad[h1_fq] && (body_j < t_body[h1_fq]);
     wire       s_valid   = b1_pop && (is_train || is_hdr || body_fwd);
-    wire [2:0] s_stype   = is_body ? ST_DATA : h1_st;          // classifier: BODY -> DATA
+    wire [2:0] s_stype   = is_body ? (h1_dmrs ? ST_DMRS : ST_DATA) : h1_st;
     wire [1:0] s_dm      = is_body ? t_dm[h1_fq] : DMB;
     wire       s_lastb   = is_body && (body_j == t_body[h1_fq] - 8'd1);
 
@@ -269,7 +295,8 @@ module rx_freq_domain #(
     // =================================================================
     // Channel estimate (TRAIN) -> H store, addressed by sc
     // =================================================================
-    wire ce_in = known_valid && (g_st == ST_TRAIN);
+    // TRAIN and DMRS (the training symbol re-sent) take the same LS path
+    wire ce_in = known_valid && (g_st == ST_TRAIN || g_st == ST_DMRS);
     reg  [1:0] ce_fseq;      // frame whose training is in the estimator
 
     wire signed [EQ_W-1:0] ch_re, ch_im;
@@ -312,8 +339,10 @@ module rx_freq_domain #(
     // the last write is the last bin.
     always @(posedge clk) begin
         if (rst) begin
-            ce_fseq <= 2'd0; h_done <= 1'b0; h_fseq <= 2'd0;
+            ce_fseq <= 2'd0; h_done <= 1'b0; h_fseq <= 2'd0; dmrs_pend <= 1'b0;
         end else begin
+            if (s_valid && s_stype == ST_DMRS) dmrs_pend <= 1'b1;
+            else if ((hd_valid || hp_valid) && h_last_q) dmrs_pend <= 1'b0;
             // A new training symbol starts a new estimate: whatever H held
             // is no longer complete for anyone. (Not relying on fseq alone:
             // fseq values repeat every 4 frames.)
@@ -337,6 +366,7 @@ module rx_freq_domain #(
     wire signed [EQ_W-1:0] eqd_re, eqd_im, eqp_re, eqp_im;
     wire        eqd_valid, eqp_valid;
     wire [EM_W-1:0] eqd_meta;
+    wire [2*EQ_W-1:0] ed_hh;      // |H|^2 the item was equalized with (soft LLR weight)
     wire [PM_W-1:0] eqp_meta;
 
     mmse_eq #(.W(EQ_W), .META_W(EM_W)) u_eq_data (
@@ -345,7 +375,8 @@ module rx_freq_domain #(
         .h_re(hs_d_re[g_sc]), .h_im(hs_d_im[g_sc]),
         .in_valid(gd_valid && (g_st == ST_HEADER || g_st == ST_DATA)),
         .in_meta({g_sym, g_st, g_fq, g_sc, g_dm, g_lastb}),
-        .y_re(eqd_re), .y_im(eqd_im), .y_valid(eqd_valid), .y_meta(eqd_meta));
+        .y_re(eqd_re), .y_im(eqd_im), .y_valid(eqd_valid), .y_meta(eqd_meta),
+        .y_hh(ed_hh));
 
     mmse_eq #(.W(EQ_W), .META_W(PM_W)) u_eq_pilot (
         .clk(clk), .rst(rst),
@@ -353,7 +384,8 @@ module rx_freq_domain #(
         .h_re(hs_p_re[g_sc[2:0]]), .h_im(hs_p_im[g_sc[2:0]]),
         .in_valid(gp_valid && (g_st == ST_DATA)),
         .in_meta({g_sym, g_fq, g_sc}),
-        .y_re(eqp_re), .y_im(eqp_im), .y_valid(eqp_valid), .y_meta(eqp_meta));
+        .y_re(eqp_re), .y_im(eqp_im), .y_valid(eqp_valid), .y_meta(eqp_meta),
+        .y_hh());
 
     wire [7:0] ed_sym, ed_sc, ep_sym, ep_sc;
     wire [2:0] ed_st;
@@ -399,7 +431,7 @@ module rx_freq_domain #(
     // Metadata beside pilot_cpe: pushed when an item ENTERS, popped when an
     // item LEAVES. pilot_cpe is in-order and 1:1 for data items, so the
     // head is always the leaving item's metadata, whatever the latency.
-    localparam integer CM_W = 8 + 2 + 8 + 2 + 1;       // sym, fseq, sc, dm, lastb
+    localparam integer CM_W = 2*EQ_W + 8 + 2 + 8 + 2 + 1;   // |H|^2, sym, fseq, sc, dm, lastb
     wire            cm_hv;
     wire [CM_W-1:0] cm_head;
     wire [$clog2(512):0] cm_level;
@@ -407,14 +439,15 @@ module rx_freq_domain #(
 
     sync_fifo_fwft #(.WIDTH(CM_W), .DEPTH(512)) u_cpe_meta (
         .clk(clk), .rst(rst),
-        .push(cpe_dv), .push_data({ed_sym, ed_fq, ed_sc, ed_dm, ed_lastb}),
+        .push(cpe_dv), .push_data({ed_hh, ed_sym, ed_fq, ed_sc, ed_dm, ed_lastb}),
         .head_valid(cm_hv), .head_data(cm_head), .pop(cpe_ov),
         .level(cm_level), .full(), .overflow(cm_ovf), .underflow(cm_unf));
 
     wire [7:0] cm_sym, cm_sc;
     wire [1:0] cm_fq, cm_dm;
     wire       cm_lastb;
-    assign {cm_sym, cm_fq, cm_sc, cm_dm, cm_lastb} = cm_head;
+    wire [2*EQ_W-1:0] cm_hh;
+    assign {cm_hh, cm_sym, cm_fq, cm_sc, cm_dm, cm_lastb} = cm_head;
 
     // =================================================================
     // Header queue: HEADER waits while OLDER data is still inside CPE
@@ -430,7 +463,8 @@ module rx_freq_domain #(
     // cm_level counts every DATA item inside CPE (stored + head).
     wire hq_pop = hq_hv && (cm_level == 0) && !cpe_ov;
 
-    sync_fifo_fwft #(.WIDTH(HQ_W), .DEPTH(256)) u_hdrq (
+    // 512: a whole 2-symbol header (432 items) may wait here
+    sync_fifo_fwft #(.WIDTH(HQ_W), .DEPTH(512)) u_hdrq (
         .clk(clk), .rst(rst),
         .push(eqd_valid && (ed_st == ST_HEADER)),
         .push_data({eqd_re, eqd_im, ed_sym, ed_fq, ed_sc}),
@@ -452,14 +486,53 @@ module rx_freq_domain #(
     wire       dm_v;
     wire [DMM_W-1:0] dm_meta;
 
-    demapper #(.W(EQ_W), .META_W(DMM_W)) u_dm (
+    // ---- per-frame soft-LLR scale (soft_llr_scale = "stream") ----
+    // Training |H|^2 sum (TRAIN estimates only; a DMRS refreshes H but not
+    // the normalizer, as in Python) and the header-noise sum (header items
+    // entering the demapper). See llr_scale.v.
+    reg ce_train;                 // the estimate in ls_chanest is a TRAINING one
+    always @(posedge clk) begin
+        if (rst) ce_train <= 1'b0;
+        else if (ce_in) ce_train <= (g_st == ST_TRAIN);
+    end
+    wire [17:0]       fr_km;
+    wire signed [7:0] fr_sh;
+    llr_scale #(.W(EQ_W)) u_llr_scale (
         .clk(clk), .rst(rst),
-        .y_re(cpe_ov ? cpe_re : hq_re), .y_im(cpe_ov ? cpe_im : hq_im),
-        .mod_scheme(cpe_ov ? cm_dm : DMB),
-        .in_valid(dm_in_v),
-        .in_meta(cpe_ov ? {cm_sym, ST_DATA, cm_fq, cm_sc, cm_lastb}
-                        : {hq_sym, ST_HEADER, hq_fq, hq_sc, 1'b0}),
-        .bits(dm_bits), .n_bits(dm_n), .out_valid(dm_v), .out_meta(dm_meta));
+        .h_valid(hd_valid && ce_train), .h_re(hd_re), .h_im(hd_im),
+        .h_done((hd_valid || hp_valid) && h_last_q && ce_train),
+        .n_valid(hq_pop), .n_re(hq_re), .n_im(hq_im),
+        .n_last(hq_sym == 8'(BODY0 - 1) && hq_sc == SC_DLAST),
+        .fr_km(fr_km), .fr_sh(fr_sh), .fr_busy());
+
+    wire [23:0] dm_llr;           // soft: 6 x 4-bit, llr[k] at [4k +: 4]
+    generate if (LLR_W == 1) begin : g_hard_dm
+        demapper #(.W(EQ_W), .META_W(DMM_W)) u_dm (
+            .clk(clk), .rst(rst),
+            .y_re(cpe_ov ? cpe_re : hq_re), .y_im(cpe_ov ? cpe_im : hq_im),
+            .mod_scheme(cpe_ov ? cm_dm : DMB),
+            .in_valid(dm_in_v),
+            .in_meta(cpe_ov ? {cm_sym, ST_DATA, cm_fq, cm_sc, cm_lastb}
+                            : {hq_sym, ST_HEADER, hq_fq, hq_sc, 1'b0}),
+            .bits(dm_bits), .n_bits(dm_n), .out_valid(dm_v), .out_meta(dm_meta));
+        assign dm_llr = 24'd0;
+    end else begin : g_soft_dm
+        // 4-bit max-log LLRs for DATA (header stays hard, +/-7), weighted by
+        // the item's |H|^2 and the frame scale. Same in-order pipeline for
+        // header and data, so the B2 stream keeps its order.
+        demapper_soft #(.W(EQ_W), .META_W(DMM_W)) u_dm (
+            .clk(clk), .rst(rst),
+            .y_re(cpe_ov ? cpe_re : hq_re), .y_im(cpe_ov ? cpe_im : hq_im),
+            .h2(cpe_ov ? cm_hh : {2*EQ_W{1'b0}}),
+            .mod_scheme(cpe_ov ? cm_dm : DMB),
+            .in_valid(dm_in_v),
+            .in_meta(cpe_ov ? {cm_sym, ST_DATA, cm_fq, cm_sc, cm_lastb}
+                            : {hq_sym, ST_HEADER, hq_fq, hq_sc, 1'b0}),
+            .fr_km(fr_km), .fr_sh(fr_sh),
+            .llr(dm_llr), .n_bits(dm_n), .out_valid(dm_v), .out_meta(dm_meta));
+        assign dm_bits = 6'd0;
+        initial if (LLR_W != 4) $fatal(1, "rx_freq_domain: soft LLRs are 4 bits (LLR_W = 4)");
+    end endgenerate
 
     wire [7:0] o_sym, o_sc;
     wire [2:0] o_st;
@@ -467,14 +540,19 @@ module rx_freq_domain #(
     wire       o_lastb;
     assign {o_sym, o_st, o_fq, o_sc, o_lastb} = dm_meta;
 
-    // LLR_W-bit LLR per bit: 0 for bit 0, -1 (all ones) for bit 1, so the
-    // hard decision is the sign bit at every width. llr[0] = first bit sent
-    // (demapper bits[5]). Groups beyond n are 0.
+    // llr[0] = first bit sent; groups beyond n are 0.
+    //   LLR_W = 1 (hard): 0 for bit 0, 1 for bit 1 (demapper bits[5-k]).
+    //   LLR_W = 4 (soft): signed 4-bit max-log LLR, > 0 means bit 0
+    //   (demapper_soft). Either way the hard decision is the sign bit.
     wire [6*LLR_W-1:0] o_llr;
     genvar gi;
     generate for (gi = 0; gi < 6; gi = gi + 1) begin : g_llr
-        assign o_llr[gi*LLR_W +: LLR_W] =
-            (gi < dm_n) ? {LLR_W{dm_bits[5-gi]}} : {LLR_W{1'b0}};
+        if (LLR_W == 1) begin : g_h
+            assign o_llr[gi*LLR_W +: LLR_W] =
+                (gi < dm_n) ? {LLR_W{dm_bits[5-gi]}} : {LLR_W{1'b0}};
+        end else begin : g_s
+            assign o_llr[gi*LLR_W +: LLR_W] = dm_llr[4*gi +: 4];
+        end
     end endgenerate
 
     wire o_sym_start   = (o_sc == 8'd0);

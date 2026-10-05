@@ -2,6 +2,17 @@
 
 ## Host and BIT (125 MHz)
 
+v3 format (golden_ref_v3): host config is `cfg_payload_bits`, `cfg_mod`
+(1/2/3 = QPSK/16QAM/64QAM), `cfg_dmrs` (header dmrs_period code: 0 off,
+1/2/3 = a DMRS after every 16/32/64 data symbols), `cfg_user[47:0]` (six
+user bytes, byte 0 in [47:40]) and `cfg_fseq`. Data + DMRS symbols must fit
+MAX_PAYLOAD_SYMBOLS = 128, else the descriptor is rejected (`st_bit_error`).
+On T1 a frame is TRAIN (sym 0, n=0 token), HEADER sym 1-2 (216 one-bit
+groups each), then DATA sym 3.. with DMRS tokens (stype 4, n=0) at the
+framing/dmrs.py slots. The notes below that predate v3 describe the same
+handshakes.
+
+
 `cfg_valid/cfg_ready` commits a descriptor: `cfg_payload_bits[15:0]`,
 `cfg_mod[2:0]` (1 QPSK, 2 QAM16, 3 QAM64), `cfg_user[63:0]` and
 `cfg_fseq[1:0]`. Payload must be nonempty, byte-aligned, fit MAX_BYTES

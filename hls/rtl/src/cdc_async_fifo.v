@@ -14,8 +14,8 @@
 //
 // Constraints (impl TCL / XDC): the clocks are asynchronous groups, and the
 // Gray pointer paths get set_max_delay -datapath_only of one source period.
-// The memory read is asynchronous (LUT-RAM), so r_data is valid with
-// r_valid and holds while r_ready is low (the stream rule).
+// The memory read is asynchronous (LUT-RAM) into a read-side output
+// register; r_data is valid with r_valid and holds while r_ready is low.
 //
 // DEPTH must be a power of two (Gray wrap). wrst / rrst are each already
 // synchronous to their own clock (cdc_reset_sync).
@@ -76,19 +76,26 @@ module cdc_async_fifo #(
     (* ASYNC_REG = "TRUE" *) reg [AW:0] wgray_r1, wgray_r2;   // write ptr, synced
     wire [AW:0] rbin_n  = rbin + 1'b1;
     wire        rempty  = (rgray == wgray_r2);
-    assign      r_valid = !rempty;
-    assign      r_data  = mem[rbin[AW-1:0]];
-    wire        rpop    = r_valid && r_ready;
+    // Registered read side: r_data is a flop in rclk, so the only
+    // wclk -> rclk data endpoints are these WIDTH flops (the asynchronous
+    // LUT-RAM read no longer runs into downstream logic in the same cycle).
+    reg              ov;
+    reg  [WIDTH-1:0] od;
+    wire        rpop    = !rempty && (!ov || r_ready);
+    assign      r_valid = ov;
+    assign      r_data  = od;
 
     always @(posedge rclk) begin
         if (rrst) begin
-            rbin <= 0; rgray <= 0; wgray_r1 <= 0; wgray_r2 <= 0;
+            rbin <= 0; rgray <= 0; wgray_r1 <= 0; wgray_r2 <= 0; ov <= 1'b0;
         end else begin
             wgray_r1 <= wgray;  wgray_r2 <= wgray_r1;
             if (rpop) begin
+                od    <= mem[rbin[AW-1:0]];
+                ov    <= 1'b1;
                 rbin  <= rbin_n;
                 rgray <= bin2gray(rbin_n);
-            end
+            end else if (r_ready) ov <= 1'b0;
         end
     end
 endmodule

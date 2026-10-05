@@ -27,10 +27,12 @@ import sys
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GOLD = os.path.join(HERE, "golden_if")
+GOLD = os.path.join(HERE, os.environ.get("GOLDEN_IF", "golden_if_v3"))
+# v3 fixtures: captured from real v3 frames (IL2 on, protected header)
+V3 = os.path.basename(GOLD.rstrip("/")) == "golden_if_v3"
 N_DATA = 216
 SRCS = ["tb/rx_bit_domain_tb.v", "src/rx_bit_domain.v", "src/il2_deint.v", "src/sync_fifo_fwft.v",
-        "src/header_decode.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v", "src/viterbi_dec_soft.v", "src/deinterleaver.v"]
+        "src/header_decode_v3.v", "src/viterbi_dec.v", "src/viterbi_dec_ovl.v", "src/viterbi_dec_soft.v", "src/deinterleaver.v"]
 
 
 def rows(path):
@@ -96,14 +98,14 @@ def main():
     ap.add_argument("--il2", action="store_true",
                     help="interleave each data symbol with interleaver2's exact "
                          "permutation and run the bit domain with IL2=1")
-    ap.add_argument("--llr-w", type=int, default=1,
+    ap.add_argument("--llr-w", type=int, default=4 if V3 else 1,
                     help="4 = soft bit domain fed the reference as +/-7 LLRs")
     a = ap.parse_args()
     wdir = os.path.join(HERE, "build", f"bd_stage_{os.getpid()}_{uuid.uuid4().hex[:8]}")
     os.makedirs(wdir)
     r = subprocess.run(["verilator", "--binary", "--timing", "-Wno-WIDTHEXPAND",
                         "-Wno-WIDTHTRUNC", "-Isrc/generated", "-Isrc", "-I.",
-                        f"-DTB_LLR_W={a.llr_w}", f"-DTB_IL2={int(a.il2)}",
+                        f"-DTB_LLR_W={a.llr_w}", f"-DTB_IL2={int(a.il2 or V3)}",
                         "--top-module", "rx_bit_domain_tb", "-o", "bd_tb",
                         "--Mdir", os.path.join(wdir, "vsim")] + SRCS,
                        cwd=HERE, capture_output=True, text=True)
@@ -135,7 +137,7 @@ def main():
             out, cfgs = [], [[0, 0, 1, 0, 0, 0, 0, 0, 0]]
         else:
             cfgs = [cfg]
-        if a.il2:
+        if a.il2 and not V3:   # v3 fixtures are already interleaver2-encoded
             items = interleave_data_symbols(items)
         tag = f"{case} C={c} {mode}"
         base = os.path.join(wdir, f"t{abs(hash(tag))}")

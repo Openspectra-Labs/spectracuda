@@ -48,8 +48,8 @@ module rx_bit_domain #(
     parameter integer MAX_PAYLOAD_SYM = 128,
     parameter integer CB_DEPTH        = MAX_PAYLOAD_SYM * `N_DATA,
     // 1 = inner frequency de-interleaver (spectracuda interleaver2) before
-    // the Viterbi; 0 = off (the frame format the RTL is pinned to today)
-    parameter integer IL2             = 0
+    // the Viterbi -- ON in the v3 format (golden_ref_v3); 0 = off
+    parameter integer IL2             = 1
 )(
     input  wire                     clk,
     input  wire                     rst,
@@ -81,7 +81,7 @@ module rx_bit_domain #(
     output reg  [2:0]               cfg_mod,
     output reg  [7:0]               cfg_body_syms,
     output wire [7:0]               cfg_c2_syms,     // 0 until C2 exists
-    output wire [1:0]               cfg_dmrs_period, // 0 until the new header
+    output reg  [1:0]               cfg_dmrs_period, // header dmrs_period code
     // header fields for the host (valid with cfg_valid)
     output reg  [15:0]              hdr_payload_len_bits,
     output reg  [7:0]               hdr_mod_scheme,
@@ -109,8 +109,7 @@ module rx_bit_domain #(
     wire acc_hdr = acc && (in_stype == ST_HEADER);
     wire acc_dat = acc && (in_stype == ST_DATA);
 
-    assign cfg_c2_syms     = 8'd0;
-    assign cfg_dmrs_period = 2'd0;
+    assign cfg_c2_syms     = 8'd0;     // C2 frames are rejected (cfg_err)
 
     // =================================================================
     // Header path: header_decode -> config publisher
@@ -121,18 +120,35 @@ module rx_bit_domain #(
     wire [3:0]  hd_bps;
     wire [2:0]  hd_crc;
     wire [4:0]  hd_fec0, hd_fec1;
-    wire [63:0] hd_user;
+    wire [47:0] hd_user;
+    wire [1:0]  hd_dmrs;
+    wire [15:0] hd_c2;
+    wire        hd_crc_ok;
 
-    // hard bit = sign of llr[0] (BPSK: n = 1)
-    header_decode u_hdr (
+    // v3 protected header over 2 BPSK symbols (432 slots): descramble,
+    // conv_v27 Viterbi, crc16, field check. Hard bit = sign of llr[0].
+    header_decode_v3 u_hdr (
         .clk(clk), .rst(rst),
         .in_bit(in_llr[LLR_W-1]), .in_valid(acc_hdr),
         .in_sof(acc_hdr && in_frame_start),
-        .done(hd_done), .fields_valid(hd_valid),
+        .done(hd_done), .fields_valid(hd_valid), .crc_ok(hd_crc_ok),
         .protocol_version(hd_ver), .payload_len_bits(hd_len),
         .mod_scheme(hd_mod), .bits_per_symbol(hd_bps),
         .crc_code(hd_crc), .fec0_code(hd_fec0), .fec1_code(hd_fec1),
-        .user_data(hd_user));
+        .dmrs_code(hd_dmrs), .c2_len_bytes(hd_c2), .user_data(hd_user));
+
+    // DMRS symbols inside the body (spectracuda framing/dmrs.py): one after
+    // every `interval` data symbols, trailing one suppressed:
+    // n_dmrs = (n_data - 1) / interval, interval = 16/32/64 -> a shift.
+    function [7:0] n_dmrs_of(input [7:0] nd, input [1:0] code);
+        case (code)
+            2'd1:    n_dmrs_of = (nd == 0) ? 8'd0 : (nd - 8'd1) >> 4;
+            2'd2:    n_dmrs_of = (nd == 0) ? 8'd0 : (nd - 8'd1) >> 5;
+            2'd3:    n_dmrs_of = (nd == 0) ? 8'd0 : (nd - 8'd1) >> 6;
+            default: n_dmrs_of = 8'd0;
+        endcase
+    endfunction
+    wire [8:0] body_total = 9'(n_sym) + 9'(n_dmrs_of(n_sym, hd_dmrs));
 
     reg  [1:0]  hdr_fseq;      // frame whose header is being decoded
     reg         counting, pend_valid;
@@ -147,14 +163,15 @@ module rx_bit_domain #(
             hdr_fseq <= 2'd0; counting <= 1'b0; pend_valid <= 1'b0;
             sym_acc <= 32'd0; n_sym <= 8'd0;
             cfg_valid <= 1'b0; cfg_err <= 1'b0; cfg_fseq <= 2'd0;
-            cfg_mod <= 3'd0; cfg_body_syms <= 8'd0;
+            cfg_mod <= 3'd0; cfg_body_syms <= 8'd0; cfg_dmrs_period <= 2'd0;
             hdr_payload_len_bits <= 16'd0; hdr_mod_scheme <= 8'd0;
             hdr_fec0 <= 5'd0; hdr_fec1 <= 5'd0; hdr_crc <= 3'd0;
         end else begin
             if (acc_hdr && in_frame_start) hdr_fseq <= in_fseq;
 
             if (hd_done) begin
-                pend_valid <= hd_valid;
+                // a C2 region is not implemented: such a frame is an error
+                pend_valid <= hd_valid && hd_c2 == 16'd0;
                 n_sym      <= 8'd0;
                 sym_acc    <= 32'd0;
                 counting   <= 1'b1;
@@ -165,10 +182,12 @@ module rx_bit_domain #(
                     counting <= 1'b0;
                     // ---- publish: every field final, one bundle ----
                     cfg_fseq <= hdr_fseq;
-                    cfg_valid <= pend_valid;
-                    cfg_err   <= !pend_valid;
+                    // MAX_PAYLOAD_SYMBOLS bounds data + DMRS together
+                    cfg_valid <= pend_valid && body_total <= 9'(MAX_PAYLOAD_SYM);
+                    cfg_err   <= !(pend_valid && body_total <= 9'(MAX_PAYLOAD_SYM));
                     cfg_mod   <= hd_mod[2:0];
-                    cfg_body_syms <= n_sym;
+                    cfg_body_syms <= body_total[7:0];
+                    cfg_dmrs_period <= hd_dmrs;
                     hdr_payload_len_bits <= hd_len;
                     hdr_mod_scheme <= hd_mod;
                     hdr_fec0 <= hd_fec0; hdr_fec1 <= hd_fec1; hdr_crc <= hd_crc;

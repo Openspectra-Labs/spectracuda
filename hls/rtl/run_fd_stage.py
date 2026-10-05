@@ -33,11 +33,11 @@ import sys
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GOLD = os.path.join(HERE, "golden_if")
+GOLD = os.path.join(HERE, os.environ.get("GOLDEN_IF", "golden_if_v3"))
 N_DATA = 216
 SRCS = ["tb/rx_freq_domain_tb.v", "src/rx_freq_domain.v", "src/sync_fifo_fwft.v",
         "src/grid_extract.v", "src/ls_chanest.v", "src/mmse_eq.v", "src/pilot_cpe.v",
-        "src/demapper.v", "src/cordic_rot.v", "src/cordic_vec.v"]
+        "src/demapper.v", "src/demapper_soft.v", "src/llr_scale.v", "src/cordic_rot.v", "src/cordic_vec.v"]
 
 
 def read_rows(path):
@@ -67,7 +67,7 @@ def frame(case, fseq):
 
 
 def cfg_line(trig, delay, valid, err, fseq, c1):
-    return [trig, delay, valid, err, fseq, c1["cfg_mod"], c1["cfg_body_syms"], 0, 0]
+    return [trig, delay, valid, err, fseq, c1["cfg_mod"], c1["cfg_body_syms"], 0, c1.get("cfg_dmrs_period", 0)]
 
 
 def write(path, rows):
