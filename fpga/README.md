@@ -27,6 +27,18 @@ host. Current state and the comparison with OpenOFDM:
 
 All runners work from any directory; they locate `fpga/` themselves.
 
+## Toolchain
+
+| Tool | Path |
+|---|---|
+| Vivado 2025.2 | `/home/abhi/work/xilinx/2025.2/Vivado/bin/vivado` (not on PATH) |
+| xsim | `xvlog`, `xelab`, `xsim` in `/home/abhi/work/xilinx/2025.2/Vivado/bin/`; glbl: `…/Vivado/data/verilog/src/glbl.v` |
+| Verilator 5.020 | `/usr/bin/verilator` (default simulator) |
+| Python | `.venv/bin/python` at the repo root |
+
+Part XC7A50T CSG325-1. More detail (licensing, xsim with IP netlists) in the
+repo-root `CLAUDE.md`.
+
 ## Common commands (from the repo root)
 
 ```sh
@@ -39,5 +51,5 @@ fpga/sim/rate_matrix.sh                        # RX regression across sample rat
 .venv/bin/python fpga/sim/tx/run_bit_tests.py  # TX bit domain
 .venv/bin/python fpga/sim/tx/run_top_tests.py  # TX full chain (+ underrun / bad symbol)
 .venv/bin/python fpga/sim/tx/run_loopback.py   # TX RTL -> RX RTL
-vivado -mode batch -source fpga/vivado/impl_rx_top.tcl   # RX place & route
+/home/abhi/work/xilinx/2025.2/Vivado/bin/vivado -mode batch -nojournal -nolog -source fpga/vivado/impl_rx_top.tcl   # RX P&R
 ```
