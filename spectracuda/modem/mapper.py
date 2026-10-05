@@ -187,7 +187,8 @@ class Modem(Block):
         return self._pt_cache
 
     def demodulate_soft(self, symbols: Any, weight: Any = None,
-                        llr_clip: float = 6.0, llr_bits: Any = None) -> Any:
+                        llr_clip: float = 6.0, llr_bits: Any = None,
+                        sigma2: Any = None) -> Any:
         """Max-log soft demodulation -> one uint8 per coded bit, in
         libcorrect's convention (0 = certainly 0, 255 = certainly 1,
         128 = no information).
@@ -211,7 +212,10 @@ class Modem(Block):
         The scale is self-calibrated: the mean squared distance to the
         nearest point estimates the post-equalization noise power, so
         llr/(2*sigma^2) is an LLR in nats and `llr_clip` nats saturates
-        the byte range.
+        the byte range. `sigma2` overrides that self-calibration with a
+        caller-supplied noise power -- a receiver that streams symbols
+        cannot see the whole frame before its first LLR (Ofdm's
+        soft_llr_scale="stream").
 
         `llr_bits` quantizes the LLR to that many SIGNED bits before it is
         written into the byte -- None (the default) keeps the full 8-bit
@@ -237,10 +241,11 @@ class Modem(Block):
         if self.scheme != "bpsk" and self._numba_path_applies(y):
             return numba_soft_llr(y, pts, labels,
                                   None if weight is None else np.asarray(weight),
-                                  float(llr_clip), llr_bits)
+                                  float(llr_clip), llr_bits, sigma2)
         pts = xp.asarray(pts)
         d = xp.abs(y[..., None] - pts[None, None, :]) ** 2      # (..., M)
-        sigma2 = float(xp.mean(xp.min(d, axis=-1))) or 1e-12
+        if sigma2 is None:
+            sigma2 = float(xp.mean(xp.min(d, axis=-1))) or 1e-12
         m = self.bits_per_symbol
         out = xp.empty(y.shape + (m,), dtype="float32")
         for b in range(m):

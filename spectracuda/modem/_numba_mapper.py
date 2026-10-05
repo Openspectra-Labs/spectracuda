@@ -197,7 +197,7 @@ def _get_soft_kernel():
         # rows, writes its own rows, no Python objects inside.
         @numba.njit(cache=True, nogil=True)
         def _soft_llr(symbols, lev, idx0, idx1, weight, use_w,
-                      clip, levels, use_q, out):
+                      clip, levels, use_q, sig_in, out):
             n_rows = symbols.shape[0]
             k = symbols.shape[1]
             n_lev = lev.shape[0]
@@ -249,6 +249,8 @@ def _get_soft_kernel():
             # sigma^2 from the mean distance to the nearest point -- the
             # same self-calibration the numpy path uses, so the two agree.
             sigma2 = min_sum / np.float64(n_rows * k)
+            if sig_in > 0.0:          # caller-supplied noise power (streaming scale)
+                sigma2 = sig_in
             if sigma2 <= 0.0:
                 sigma2 = 1e-12
             inv = np.float32(1.0 / (2.0 * sigma2 * clip))
@@ -277,7 +279,7 @@ def _get_soft_kernel():
     return _soft_kernel
 
 
-def numba_soft_llr(symbols, pts, labels, weight, llr_clip, llr_bits):
+def numba_soft_llr(symbols, pts, labels, weight, llr_clip, llr_bits, sigma2=None):
     """symbols (n_rows, k) complex64 -> (n_rows, k*bits_per_symbol) uint8
     in libcorrect's convention. Separable square-QAM only (the caller
     gates on that); bpsk and any non-separable scheme take mapper.py's
@@ -308,5 +310,7 @@ def numba_soft_llr(symbols, pts, labels, weight, llr_clip, llr_bits):
     use_q = llr_bits is not None
     levels = np.float32(2 ** (int(llr_bits) - 1) - 1) if use_q else np.float32(1.0)
     out = np.empty((n_rows, k * m), dtype=np.uint8)
-    fn(sym, lev, idx0, idx1, w, use_w, np.float32(llr_clip), levels, use_q, out)
+    # sigma2 <= 0 means: self-calibrate from the data (the default)
+    sig = np.float64(-1.0 if sigma2 is None else sigma2)
+    fn(sym, lev, idx0, idx1, w, use_w, np.float32(llr_clip), levels, use_q, sig, out)
     return out

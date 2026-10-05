@@ -279,3 +279,31 @@ def test_sse_and_portable_soft_decoders_agree_on_graded_input():
                    0, 255).astype("uint8")
     np.testing.assert_array_equal(np.asarray(p.decode_soft(soft)),
                                   np.asarray(q.decode_soft(soft)))
+
+
+def test_soft_llr_scale_stream_decodes_and_matches_override():
+    """soft_llr_scale="stream" (header noise, training |H|^2 normalizer --
+    what the streaming v3 RTL receiver computes) decodes a clean DMRS frame,
+    and demodulate_soft's sigma2 override equals folding 1/sigma2 into the
+    weight, which is how Ofdm applies the per-frame scale."""
+    import numpy as np
+    from spectracuda.pipeline import Ofdm
+    from spectracuda.modem import Modem
+    o = Ofdm(fft_size=256, cp_len=32, n_data=216, n_pilot=8, modem="qam16", fec1="conv_v27",
+             interleaver="block", interleaver_kwargs={"unit_bits": 8}, soft_llr_bits=4,
+             soft_llr_scale="stream", soft_llr_clip=3.0, dmrs_interval=16)
+    b = np.random.default_rng(3).integers(0, 2, (1, 8000)).astype("uint8")
+    f = np.asarray(o.generate_frame(b))
+    f = np.concatenate([np.zeros((1, 200), f.dtype), f, np.zeros((1, 200), f.dtype)], -1)
+    r = o.rx_process(f)
+    assert np.array_equal(np.asarray(r["bits"]).ravel()[:8000], b.ravel())
+    assert o._stream_noise is not None and float(o._stream_noise[0]) > 0
+    m = Modem("qam16")
+    y = (np.random.default_rng(4).normal(size=(3, 50)) + 1j * np.random.default_rng(5).normal(size=(3, 50))).astype(np.complex64)
+    w = np.random.default_rng(6).uniform(0.2, 2.0, size=(3, 50)).astype(np.float32)
+    a = m.demodulate_soft(y, weight=w, llr_clip=3.0, llr_bits=4, sigma2=0.5)
+    c = m.demodulate_soft(y, weight=w / 0.5, llr_clip=3.0, llr_bits=4, sigma2=1.0)
+    assert np.array_equal(a, c)
+    import pytest
+    with pytest.raises(ValueError):
+        Ofdm(fft_size=256, cp_len=32, n_data=216, n_pilot=8, soft_llr_scale="bogus")

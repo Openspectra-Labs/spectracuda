@@ -304,6 +304,7 @@ class Ofdm(Block):
         soft_decision: bool = True,
         soft_llr_bits: Optional[int] = None,
         soft_llr_clip: float = 6.0,
+        soft_llr_scale: str = "frame",
         interleaver2: str = "block",
         interleaver2_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -414,6 +415,24 @@ class Ofdm(Block):
         # not determine coding gain.
         self.soft_llr_bits = None if soft_llr_bits is None else int(soft_llr_bits)
         self.soft_llr_clip = float(soft_llr_clip)
+        # How the LLRs are scaled (the noise power sigma^2 and the |H|^2
+        # weight normalizer):
+        #   "frame"  (default) both averaged over the WHOLE payload -- needs
+        #            the entire frame before the first LLR.
+        #   "stream" both known BEFORE the payload, as a streaming FPGA
+        #            receiver must have them: sigma^2 = mean squared
+        #            distance of the equalized HEADER symbols to their
+        #            nearest BPSK point, |H|^2 normalized by the mean
+        #            over the TRAINING estimate (DMRS segments keep that
+        #            normalizer). One scale per frame, so the Viterbi sees
+        #            the same relative confidences either way; only what
+        #            the clip/quantizer levels span can differ. The v3 RTL
+        #            (hls/rtl, golden_ref_v3) implements this mode.
+        if soft_llr_scale not in ("frame", "stream"):
+            raise ValueError(f"soft_llr_scale={soft_llr_scale!r}; expected 'frame' or 'stream'")
+        self.soft_llr_scale = soft_llr_scale
+        self._stream_noise = None        # per batch row, set by the header decode
+        self._stream_h2_mean = None
         # INNER (frequency) interleaver: permutes the coded bits AFTER
         # fec1 and immediately before they are mapped to subcarriers, and
         # un-permutes them before Viterbi on receive. Default "none", so
@@ -1330,6 +1349,7 @@ class Ofdm(Block):
         h_hat_pilots = h_hat_pilots_sum / self.n_training_symbols
 
         header_bits_chunks = []
+        header_eq_chunks = []
         for _ in range(self.num_symbols_header):
             header_slot = self._extract_slot(rx_corrected, pos, self.slot_len)
             pos = pos + self.slot_len
@@ -1337,6 +1357,17 @@ class Ofdm(Block):
             header_rx_data = self.grid.extract_data(xp, header_rx_grid)
             header_equalized = self.equalizer.process(header_rx_data, channel_est=h_hat_data)
             header_bits_chunks.append(self.header_modem.demodulate(header_equalized))
+            header_eq_chunks.append(header_equalized)
+        # soft_llr_scale="stream": the noise power and the |H|^2 normalizer
+        # a streaming receiver has BEFORE its first payload symbol (see
+        # __init__). Per batch row.
+        if self.soft_llr_scale == "stream":
+            heq = xp.concatenate(header_eq_chunks, axis=-1)
+            hp, _ = self.header_modem._point_table()
+            hp = xp.asarray(hp)
+            hd = xp.min(xp.abs(heq[..., None] - hp[None, None, :]) ** 2, axis=-1)
+            self._stream_noise = xp.maximum(xp.mean(hd, axis=-1), 1e-12)
+            self._stream_h2_mean = xp.maximum(xp.mean(xp.abs(h_hat_data) ** 2, axis=-1), 1e-12)
         header_fields = self._decode_header_symbols(xp.concatenate(header_bits_chunks, axis=-1))
         # Resolved from the DECODED header, never from self -- the same
         # rule mod_scheme/crc/fec0/fec1 already follow, and the reason a
@@ -1883,14 +1914,23 @@ class Ofdm(Block):
             # be sliced the same batch-major/symbol-minor way to stay
             # row-aligned with it.
             w = xp.abs(h_hat_combined) ** 2
-            w = w / xp.mean(w)
+            sigma2_override = None
+            if self.soft_llr_scale == "stream":
+                # per-row (frame) scale folded into the weight, sigma^2 := 1:
+                # llr = raw / 2 * |H|^2 / (mean_train|H|^2 * noise_header)
+                per_row = xp.repeat(self._stream_h2_mean * self._stream_noise, n_data_total)
+                w = w / per_row[:, None]
+                sigma2_override = 1.0
+            else:
+                w = w / xp.mean(w)
             if n_c2:
                 w = w.reshape(n_batch, n_data_total, -1)[:, n_c2:, :].reshape(
                     n_batch * n_payload_symbols, -1
                 )
             soft_payload = payload_modem.demodulate_soft(
                 equalized_combined, weight=w,
-                llr_clip=self.soft_llr_clip, llr_bits=self.soft_llr_bits)
+                llr_clip=self.soft_llr_clip, llr_bits=self.soft_llr_bits,
+                sigma2=sigma2_override)
             # Soft values take the SAME inverse permutation as the hard
             # bits -- they are per-coded-bit quantities in the same order,
             # so a soft path that skipped this would hand Viterbi
