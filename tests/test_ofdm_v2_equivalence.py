@@ -31,7 +31,8 @@ from spectracuda.pipeline import Ofdm
 from spectracuda.pipeline.v2.env import PhyEnv
 from spectracuda.pipeline.v2.rx_bit_domain import RxBitDomain
 from spectracuda.pipeline.v2.rx_freq_domain import RxFreqDomain
-from spectracuda.pipeline.v2.rx_time_domain import RxTimeDomain
+from spectracuda.pipeline.v2.rx_pipeline import RxPipeline
+from spectracuda.pipeline.v2.rx_time_domain import RxTimeDomain, TdStream
 from spectracuda.pipeline.v2.stage_if import SoftConfig, SymbolType
 from spectracuda.sim import Channel
 
@@ -398,3 +399,184 @@ def test_freq_domain_also_honours_a_sticky_abort():
     fd.training(td.symbols(fid, 0, env.n_training_symbols, SymbolType.TRAIN))
     assert fid not in fd._frames
     assert fd.stats["dropped_invalid"] >= 1
+
+
+# ========================================================= streaming ====
+#
+# Step 2 of the plan, and it runs BEFORE threads on purpose: every failure
+# below is a sequencing failure, and a thread would only make it
+# intermittent. All four scenarios here found or guard a real bug.
+
+
+def stream_pipeline(o, chunk_symbols=1):
+    return RxPipeline(PhyEnv.from_ofdm(o), soft=soft_config_from(o),
+                      expected_fec=(o.fec, o.fec1), chunk_symbols=chunk_symbols)
+
+
+def drive(rx, sig, chunk=2048):
+    out = []
+    for i in range(0, sig.shape[-1], chunk):
+        out += rx.feed(sig[:, i:i + chunk])
+    return out
+
+
+def gap(n):
+    return np.zeros((1, n), dtype="complex64")
+
+
+def concat(*parts):
+    return np.concatenate([np.asarray(p) for p in parts], axis=-1)
+
+
+def matches(results, tx):
+    for r in results:
+        b = np.asarray(r["bits"])[0]
+        if b.shape[0] >= tx.shape[1] and np.array_equal(b[: tx.shape[1]], tx[0]):
+            return True
+    return False
+
+
+@pytest.mark.parametrize("chunk", [256, 512, 2048, 8192, 10**6])
+def test_back_to_back_frames_of_differing_lengths(chunk):
+    """Three frames of 120 / 600 / 64 bytes, and the chunk size must not
+    matter. This found TWO real bugs:
+
+    * A retired frame's preamble was forgotten while its samples were
+      still buffered, so the same preamble was detected and decoded a
+      SECOND time -- three transmitted frames came out as four decodes,
+      the last a byte-identical duplicate. Starts are now remembered
+      until the samples are trimmed.
+    * `sync.process()` returns one GLOBAL argmax, so one call finds one
+      preamble and that one need not be the earliest. With a chunk
+      carrying several frames this decoded two of three with the wrong
+      payloads, and whole-buffer feeds decoded only the LAST frame. The
+      buffer is now scanned in overlapping windows, in time order.
+
+    `chunk=10**6` deliberately delivers the entire signal in one call,
+    which is the case both bugs hid in.
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    txs = [payload(n, seed=s) for s, n in ((1, 120), (2, 600), (3, 64))]
+    parts = [gap(800)]
+    for tx in txs:
+        parts += [o.generate_frame(tx), gap(300)]
+    parts.append(gap(3000))
+
+    rx = stream_pipeline(o)
+    got = drive(rx, concat(*parts), chunk)
+
+    assert len(got) == len(txs), f"expected {len(txs)} decodes, got {len(got)}"
+    for tx in txs:
+        assert matches(got, tx)
+    assert rx.stream.stats["detections"] == len(txs)
+
+
+def test_an_undecodable_header_costs_one_frame_and_no_more():
+    """A false sync detection's most common real outcome.
+
+    The frame must be dropped -- never decoded into something
+    plausible-looking -- and the NEXT frame must still be recovered. If a
+    bad header could wedge the stream, a single noise burst would take the
+    link down until a reset.
+
+    The header is replaced with noise rather than attenuated: scaling BPSK
+    by a positive real does not move any decision boundary, so an
+    attenuated header decodes perfectly well. (That mistake made an
+    earlier version of this test pass while proving nothing.)
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    tx_bad, tx_good = payload(200, seed=1), payload(200, seed=2)
+
+    frame = np.asarray(o.generate_frame(tx_bad)).copy()
+    h0 = o.fft_size + o.n_training_symbols * o.slot_len
+    n = o.num_symbols_header * o.slot_len
+    rng = np.random.default_rng(99)
+    frame[:, h0:h0 + n] = (rng.normal(size=(1, n))
+                           + 1j * rng.normal(size=(1, n))).astype("complex64") * 0.3
+
+    rx = stream_pipeline(o)
+    got = drive(rx, concat(gap(800), frame, gap(300),
+                           o.generate_frame(tx_good), gap(3000)))
+
+    assert rx.stats["header_failed"] == 1
+    assert not matches(got, tx_bad), "a corrupted header must not decode"
+    assert matches(got, tx_good), "the next frame must still be recovered"
+
+
+def test_a_stream_gap_aborts_what_is_in_flight_and_recovers_after():
+    """A discontinuity invalidates symbol alignment for EVERY frame in
+    flight, not just one -- "the next slot_len samples are the next
+    symbol" stops being true. So the gap aborts all active frames, and
+    the receiver has to resynchronize cleanly afterwards rather than
+    decoding across the seam."""
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    tx_cut, tx_after = payload(300, seed=3), payload(300, seed=4)
+
+    frame = np.asarray(o.generate_frame(tx_cut))
+    rx = stream_pipeline(o)
+    got = drive(rx, concat(gap(800), frame[:, : frame.shape[-1] // 2]))
+    rx.gap(5000)
+    got += drive(rx, concat(o.generate_frame(tx_after), gap(3000)))
+
+    assert rx.stats["gaps"] == 1
+    assert rx.stats["aborted"] >= 1, "the half-delivered frame must be aborted"
+    assert not matches(got, tx_cut)
+    assert matches(got, tx_after), "must resynchronize after the gap"
+
+
+def test_a_false_peak_inside_a_frame_is_suppressed_not_promoted():
+    """The invariant that gates the move to threads.
+
+    A real preamble is written into the frame's TRAINING span -- inside
+    its minimum extent, where the frame is certainly still running, so any
+    peak there is a false correlation. TD must record such peaks as
+    candidates and start NO new frame: acting on one would re-align
+    mid-frame and corrupt a frame that was decoding fine.
+
+    This asserts the sync decision only, not that the frame still decodes
+    -- overwriting training symbols destroys the channel estimate by
+    construction, so requiring a good decode here would be testing
+    interference instead of the FSM.
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    frame = np.asarray(o.generate_frame(payload(600, seed=5))).copy()
+    preamble = frame[:, : o.fft_size].copy()
+    frame[:, o.fft_size + o.slot_len: o.fft_size + o.slot_len + o.fft_size] = preamble
+
+    td = RxTimeDomain(PhyEnv.from_ofdm(o))
+    stream = TdStream(td)
+    started = []
+    sig = concat(gap(600), frame, gap(2000))
+    for i in range(0, sig.shape[-1], 2048):
+        started += stream.feed(sig[:, i:i + 2048])
+
+    assert len(started) == 1, f"one frame, got {len(started)}"
+    assert stream.stats["suppressed_in_frame"] > 0, "the false peaks must be seen and refused"
+    assert td.stats["candidates_seen"] == stream.stats["suppressed_in_frame"]
+    assert td.stats["frames_aborted"] == 0, "no frame may be abandoned by a false peak"
+
+
+def test_pure_noise_produces_no_frames():
+    """The null hypothesis. `sync.process()` is a best-window search, not
+    a detector, so it always returns SOME candidate -- without the
+    threshold gate a receiver fed noise invents frames and burns FEC on
+    them."""
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    rng = np.random.default_rng(7)
+    noise = (rng.normal(size=(1, 60000)) + 1j * rng.normal(size=(1, 60000))).astype("complex64")
+    rx = stream_pipeline(o)
+    got = drive(rx, noise)
+    assert got == []
+    assert rx.stats["completed"] == 0
+
+
+@pytest.mark.parametrize("chunk_symbols", [1, 4, 8])
+def test_streaming_recovers_the_payload_at_every_fd_batch_size(chunk_symbols):
+    """`chunk_symbols` is how many symbols ride in one FIFO message -- a
+    throughput knob (step 5 sweeps it) that must never be a correctness
+    one."""
+    o = make_ofdm("qam16", dmrs_interval=32, soft_llr_scale="stream")
+    tx = payload(400, seed=11)
+    rx = stream_pipeline(o, chunk_symbols=chunk_symbols)
+    got = drive(rx, concat(gap(800), o.generate_frame(tx), gap(3000)))
+    assert matches(got, tx)

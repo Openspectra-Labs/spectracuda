@@ -49,7 +49,7 @@ import numpy as np
 from ...block import Block
 from ...framing.stats import compute_rssi_db
 from .env import PhyEnv
-from .stage_if import FftBatch, FrameAbort, SymbolType
+from .stage_if import FftBatch, FrameAbort, StreamGap, SymbolType
 
 
 @dataclass
@@ -72,6 +72,16 @@ class FrameSync:
     rssi_db: Any
     n_emitted: int = 0
     aborted: bool = False
+    # Streaming only. `abs_start` is the preamble's ABSOLUTE index, which
+    # is the fixed reference every later correction is measured from --
+    # `cfo.correct()` de-rotates from index 0 of whatever array it is
+    # given, so correcting a span that began somewhere else would apply
+    # the wrong phase. Always correcting from the preamble keeps the
+    # phase consistent across the frame; the resulting constant offset
+    # relative to a one-shot correction from the buffer's own origin is a
+    # COMMON phase and is absorbed by h_hat.
+    abs_start: Optional[int] = None
+    corrected_len: int = 0
 
 
 @dataclass
@@ -230,6 +240,57 @@ class RxTimeDomain(Block):
 
     # ---- symbol production -------------------------------------------
 
+    def begin_stream_frame(self, buffer: Any, rel: int, metric: float,
+                           *, base_offset: int) -> int:
+        """Open a frame from a streaming detection.
+
+        Only the preamble (plus the trailing-edge guard's L samples) is
+        buffered at this point, so the CFO is estimated now -- from the
+        preamble, which is all the estimator needs -- and APPLIED later,
+        as the rest of the frame arrives. That split is what makes
+        streaming different from `detect()`, where everything is present
+        at once.
+        """
+        env, xp = self.env, self.env.xp
+        start_arr = xp.asarray([rel])
+        cfo_estimate = env.cfo.process(buffer, start_index=start_arr)
+        frame_id = self._next_frame_id
+        self._next_frame_id += 1
+        self._frames[frame_id] = FrameSync(
+            frame_id=frame_id, start_index=start_arr,
+            sync_metric=xp.asarray([metric]), cfo_estimate=cfo_estimate,
+            rx_corrected=None,
+            # Relative to the frame's OWN corrected array, which begins at
+            # the preamble -- hence `fft_size` (skip the preamble) less the
+            # timing advance, and no `start_index` term.
+            pos0=xp.asarray([env.fft_size - env.timing_advance]),
+            rssi_db=compute_rssi_db(xp, buffer),
+            abs_start=base_offset + rel,
+        )
+        self.stats["frames_started"] += 1
+        return frame_id
+
+    def extend_stream_frame(self, frame_id: int, buffer: Any, base_offset: int) -> None:
+        """Re-correct the frame's span now that more samples have arrived.
+
+        Corrected from `abs_start` every time, for the phase reason given
+        on `FrameSync.abs_start`. Only grows, and only when it has to.
+        """
+        env = self.env
+        fs = self._frames[frame_id]
+        begin = fs.abs_start - base_offset
+        if begin < 0:
+            raise ValueError(
+                f"frame {frame_id}: its preamble at {fs.abs_start} has been trimmed "
+                f"from the buffer (origin now {base_offset}) -- the frame outlived "
+                f"the samples it needs"
+            )
+        span = buffer[:, begin:]
+        if int(span.shape[-1]) <= fs.corrected_len:
+            return
+        fs.rx_corrected = env.cfo.correct(span, fs.cfo_estimate)
+        fs.corrected_len = int(span.shape[-1])
+
     def symbols(self, frame_id: int, symbol_offset: int, n_sym: int,
                 stype: SymbolType = SymbolType.BODY) -> FftBatch:
         """Extract `n_sym` consecutive slots and FFT them.
@@ -299,3 +360,278 @@ class RxTimeDomain(Block):
     def process(self, batch: Any, **kwargs: Any) -> Any:
         """`Block`'s entry point -- `detect()` under its required name."""
         return self.detect(batch, **kwargs)
+
+
+# ======================================================================
+# Streaming
+# ======================================================================
+#
+# `detect()` above is "one buffer, one frame" -- enough to prove the
+# partition, not enough to run a radio. `TdStream` is the continuous-feed
+# form, and it is where TD's real complexity lives.
+#
+# TWO BUGS INHERITED AS REQUIREMENTS, both measured in V1 rather than
+# reasoned about, and both easy to reintroduce:
+#
+# 1. BOUND THE BUFFER AS HISTORY + CHUNK, never as a fixed total. V1
+#    originally capped with `buffer[-cap:]` AFTER concatenating, which
+#    discarded the entire previous buffer whenever one chunk was as long
+#    as the cap -- and 2048 samples is exactly what the Pluto example
+#    scripts feed. A preamble that had started in the previous chunk's
+#    tail lost its head and was never found: ~9% of all alignments
+#    silently lost on a CLEAN channel.
+#
+# 2. TRAILING-EDGE GUARD. A partially-arrived preamble already scores
+#    (2(k-L)/k)^2 at the last candidate offset -- 0.44 with three
+#    quarters present, 0.73 with seven eighths, both far above the 0.3
+#    default threshold -- with a `start_index` that is (fft_size - k)
+#    samples EARLY. Early by more than the CP means ISI and a failed
+#    decode: up to ~30% of alignments lost at chunk=64. The fix is to
+#    refuse a detection until L = fft_size/2 further samples are
+#    buffered, by which point the argmax is the true start. L is the
+#    exact bound and is independent of the threshold, because with <= L
+#    preamble samples present the two halves do not overlap at all.
+#
+# HOW A FRAME ENDS, WITHOUT ANYTHING FLOWING BACKWARD. TD cannot know a
+# frame's length. So it does not decide: each active frame emits until it
+# hits `max_payload_symbols` (a bound, so termination never depends on
+# another stage) or until the orchestrator retires it. Retirement is
+# FLOW CONTROL -- "these samples are no longer needed" -- and carries no
+# decode information, so it is not the backward config path V2 rejects;
+# it is also strictly optional, because the cap alone guarantees the
+# frame stops.
+#
+# Several frames may therefore be active at once, which is what makes
+# back-to-back frames of DIFFERING lengths work: a new preamble starts a
+# new frame immediately instead of waiting for the previous one to be
+# declared finished by a stage downstream.
+
+
+class TdStream:
+    """Continuous-feed front end around `RxTimeDomain`.
+
+    Owns the sample buffer and the SEEKING/ACTIVE decision. This is the
+    state `Ofdm` keeps as `_stream_buffer` / `_stream_state` /
+    `_stream_frame_start` on `self`; here it belongs to TD, which is what
+    lets a second stage run on another thread without racing it.
+    """
+
+    def __init__(self, td: RxTimeDomain, *, search_window_symbols: int = 8) -> None:
+        self.td = td
+        self.env = td.env
+        self.search_window_symbols = search_window_symbols
+        self.reset()
+
+    def reset(self) -> None:
+        """Abandon whatever is in flight and start over."""
+        xp = self.env.xp
+        self.buffer = xp.zeros((1, 0), dtype="complex64")
+        self.base_offset = 0          # absolute index of buffer[0]
+        self.active: List[int] = []   # frame_ids still emitting, oldest first
+        self._starts: Dict[int, int] = {}   # frame_id -> absolute preamble start
+        # Absolute starts already detected, INCLUDING retired frames.
+        # `_starts` alone is not enough: it loses a frame when the frame
+        # retires, but that frame's samples are still in the buffer, so
+        # the same preamble gets detected and decoded a SECOND time.
+        # Measured: three transmitted frames came out as four decodes,
+        # the last one a byte-identical duplicate. Pruned in `_trim` once
+        # the samples are gone, since a trimmed preamble can never be
+        # re-detected.
+        self._seen: set = set()
+        self._min_extent = (self.env.n_training_symbols + self.env.num_symbols_header)
+        self.stats = {"chunks": 0, "detections": 0, "suppressed_in_frame": 0,
+                      "gaps": 0, "capped": 0}
+
+    # ---- input -------------------------------------------------------
+
+    def gap(self, n_samples: int = 0) -> List[Any]:
+        """Declare the input discontinuous.
+
+        Every active frame's symbol alignment is now meaningless -- a gap
+        is not one frame's problem, it invalidates the notion of "the next
+        slot_len samples are the next symbol" for all of them. So every
+        active frame is aborted and the buffer dropped, and the aborts are
+        returned for the orchestrator to publish on the control channel.
+        """
+        xp = self.env.xp
+        events: List[Any] = []
+        for fid in list(self.active):
+            self.td.abort(fid, reason="stream gap")
+        events.extend(self.td.drain_control())
+        events.append(StreamGap(sample_offset=self.base_offset + int(self.buffer.shape[-1]),
+                                reason="declared by caller"))
+        self.active.clear()
+        self._starts.clear()
+        self.base_offset += int(self.buffer.shape[-1]) + int(n_samples)
+        self.buffer = xp.zeros((1, 0), dtype="complex64")
+        self.stats["gaps"] += 1
+        return events
+
+    def feed(self, chunk: Any) -> List[int]:
+        """Append samples and return the frame_ids newly detected.
+
+        Detection only. Symbols are produced by `ready()` so the caller
+        controls batch size, which is the knob step 5 sweeps.
+        """
+        xp = self.env.xp
+        chunk = xp.asarray(chunk)
+        if chunk.ndim == 1:
+            chunk = chunk[None, :]
+        chunk = self.td._quantize(chunk)
+        self.buffer = xp.concatenate([self.buffer, chunk], axis=-1)
+        self.stats["chunks"] += 1
+        self._trim()
+        return self._search()
+
+    def _trim(self) -> None:
+        """Keep history + the newest chunk, never a fixed total.
+
+        See requirement 1 above: the fixed-total form is what lost ~9% of
+        alignments at chunk=2048. Samples still needed by an active frame
+        are never trimmed, because TD owns those until the frame is
+        retired or capped.
+        """
+        keep_from = self.base_offset
+        if self.active:
+            keep_from = min(self._starts[f] for f in self.active)
+        history = self.search_window_symbols * self.env.fft_size
+        want_from = self.base_offset + int(self.buffer.shape[-1]) - history
+        cut_at = min(keep_from, want_from) - self.base_offset
+        if cut_at > 0:
+            self.buffer = self.buffer[:, cut_at:]
+            self.base_offset += int(cut_at)
+        self._seen = {s for s in self._seen if s >= self.base_offset}
+
+    def _search(self) -> List[int]:
+        """Find every preamble in the buffer, IN TIME ORDER.
+
+        Two things make this harder than one `sync.process()` call:
+
+        1. `sync.process()` returns ONE argmax for the array it is given,
+           so a single call finds a single preamble. Fine with small
+           chunks, wrong as soon as one chunk carries several frames: at
+           8192-sample chunks three transmitted frames came out as two
+           decodes, both of the wrong payload.
+        2. That argmax is the GLOBAL maximum, which need not be the
+           EARLIEST preamble. Accepting it and advancing past it skipped
+           every frame before it -- whole-buffer feeds decoded only the
+           last frame.
+
+        So the buffer is scanned in overlapping windows instead, and peaks
+        are taken in the order they occur. The window is 2*fft_size + L
+        with a stride of fft_size, which guarantees any preamble is wholly
+        inside at least one window along with the L samples its
+        trailing-edge guard needs.
+        """
+        env = self.env
+        found: List[int] = []
+        L = env.fft_size // 2
+        buf_len = int(self.buffer.shape[-1])
+        if buf_len < env.fft_size:
+            return found                   # not even one preamble's worth
+
+        win = 2 * env.fft_size + L
+        stride = env.fft_size
+        min_frame = env.fft_size + self._min_extent * env.slot_len
+        cursor = 0
+        while cursor < buf_len:
+            span = self.buffer[:, cursor:cursor + win]
+            if int(span.shape[-1]) < env.fft_size:
+                break
+            res = env.sync.process(span)
+            metric = float(np.asarray(self.td._to_host(res["metric"]))[0])
+            rel = int(np.asarray(self.td._to_host(res["start_index"]))[0])
+            absolute = self.base_offset + cursor + rel
+
+            accept = metric >= env.sync_threshold
+            # Trailing-edge guard, measured against the WHOLE buffer: a
+            # partially-arrived preamble scores 0.73 with seven eighths
+            # present, with a start up to fft_size too early, and early
+            # by more than the CP means ISI and a failed decode.
+            if accept and (cursor + rel + env.fft_size + L > buf_len):
+                accept = False
+            # Already taken, within a tolerance -- the argmax shifts a
+            # sample or two between calls because the window differs even
+            # though the samples do not. L is safe: two genuine frames
+            # cannot start that close.
+            if accept and any(abs(absolute - seen) <= L for seen in self._seen):
+                accept = False
+            if accept:
+                # A peak inside an active frame's MINIMUM extent is
+                # recorded as a candidate, not promoted: there the frame
+                # is certainly still running, so the peak is a false
+                # correlation and acting on it would corrupt a frame that
+                # is decoding fine. Past that span TD cannot tell, so the
+                # peak is taken at face value -- more likely the next
+                # frame than a phantom, and a wrong guess costs one frame
+                # rather than every frame after it.
+                for fid in self.active:
+                    floor = self._starts[fid] + env.fft_size
+                    if floor <= absolute < floor + self._min_extent * env.slot_len:
+                        self.td.offer_candidate(absolute, metric, absolute)
+                        self.stats["suppressed_in_frame"] += 1
+                        accept = False
+                        break
+
+            if accept:
+                fid = self.td.begin_stream_frame(
+                    self.buffer, absolute - self.base_offset, metric,
+                    base_offset=self.base_offset)
+                self._starts[fid] = absolute
+                self._seen.add(absolute)
+                self.active.append(fid)
+                self.stats["detections"] += 1
+                found.append(fid)
+                cursor = (absolute - self.base_offset) + min_frame
+            else:
+                cursor += stride
+        return found
+
+    # ---- output ------------------------------------------------------
+
+    def ready(self, frame_id: int, n_sym: int) -> bool:
+        """Are `n_sym` symbols from this frame's start fully buffered?"""
+        env = self.env
+        need = (self._starts[frame_id] + env.fft_size - env.timing_advance
+                + n_sym * env.slot_len)
+        return need <= self.base_offset + int(self.buffer.shape[-1])
+
+    def capped(self, frame_id: int, emitted: int) -> bool:
+        """Has this frame emitted everything TD is willing to give it?
+
+        The bound that makes termination independent of any other stage.
+        """
+        return emitted >= (self.env.n_training_symbols + self.env.num_symbols_header
+                           + self.env.max_payload_symbols)
+
+    def symbols(self, frame_id: int, symbol_offset: int, n_sym: int,
+                stype: SymbolType = SymbolType.BODY) -> FftBatch:
+        """Produce symbols for a streaming frame.
+
+        Brings the frame's CFO correction up to date first, because in
+        streaming the samples these symbols need may have arrived long
+        after the frame was opened.
+        """
+        self.td.extend_stream_frame(frame_id, self.buffer, self.base_offset)
+        batch = self.td.symbols(frame_id, symbol_offset, n_sym, stype)
+        # `sample_offset` must be ABSOLUTE on the wire, and `td.symbols`
+        # computes it against the frame's own corrected array. Re-base it
+        # so a gap or re-sync stays unambiguous downstream.
+        return FftBatch(
+            frame_id=batch.frame_id, symbol_offset=batch.symbol_offset,
+            sample_offset=self._starts[frame_id] + batch.sample_offset,
+            bins=batch.bins, stype=batch.stype, frame_start=batch.frame_start,
+        )
+
+    def retire(self, frame_id: int) -> None:
+        """Flow control, not configuration: release a frame's samples.
+
+        Carries no decode information, so it is not the backward path V2
+        rejects, and it is optional -- `capped()` already guarantees a
+        frame stops.
+        """
+        self.td.retire(frame_id)
+        self._starts.pop(frame_id, None)
+        if frame_id in self.active:
+            self.active.remove(frame_id)
+        self._trim()
