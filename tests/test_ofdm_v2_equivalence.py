@@ -29,8 +29,10 @@ import pytest
 
 from spectracuda.pipeline import Ofdm
 from spectracuda.pipeline.v2.env import PhyEnv
+from spectracuda.pipeline.v2.rx_bit_domain import RxBitDomain
+from spectracuda.pipeline.v2.rx_freq_domain import RxFreqDomain
 from spectracuda.pipeline.v2.rx_time_domain import RxTimeDomain
-from spectracuda.pipeline.v2.stage_if import SymbolType
+from spectracuda.pipeline.v2.stage_if import SoftConfig, SymbolType
 from spectracuda.sim import Channel
 
 FS = 20e6
@@ -193,3 +195,206 @@ def test_candidate_evaluation_cannot_disturb_the_active_frame():
     assert td.stats["frames_aborted"] == 1
     with pytest.raises(KeyError):
         td.symbols(fid, 0, 1)
+
+
+# ------------------------------------------------------- full chain ----
+
+def soft_config_from(o):
+    """Mirror an `Ofdm`'s soft settings into a `SoftConfig`.
+
+    All four, always. Pinning three of them and letting the fourth drift
+    is the way this suite would lie: `Ofdm`'s defaults differ from the
+    FPGA profile on every one, so a half-pinned arm fails for reasons
+    that have nothing to do with the partition.
+    """
+    return SoftConfig(enabled=o.soft_decision_active, metric=o.soft_llr_metric,
+                      bits=o.soft_llr_bits, clip=o.soft_llr_clip, scale=o.soft_llr_scale)
+
+
+def run_v2(o, rx, chunk=1):
+    """Drive TD -> FD -> BIT by hand, single-threaded.
+
+    This is the step-1 composition: the orchestration that the flowgraph
+    will later do with queues, written out so the partition can be proved
+    bit-exact BEFORE threads are introduced. Nothing here is concurrent,
+    which is the point -- a failure now is a partition bug, not a race.
+    """
+    env = PhyEnv.from_ofdm(o)
+    td, bd = RxTimeDomain(env), RxBitDomain(env)
+    fd = RxFreqDomain(env, soft_config_from(o))
+    fd.configure_expected_fec(o.fec, o.fec1)
+
+    d = td.detect(rx)
+    if not d["frame_found"]:
+        return None
+    fid = d["frame_id"]
+    fd.training(td.symbols(fid, 0, env.n_training_symbols, SymbolType.TRAIN))
+    cfg = fd.decode_header(td.symbols(
+        fid, env.n_training_symbols, env.num_symbols_header, SymbolType.HEADER))
+
+    base = env.n_training_symbols + env.num_symbols_header
+    emitted, out = 0, None
+    while emitted < cfg.n_total_slots:
+        n = min(chunk, cfg.n_total_slots - emitted)
+        for llr in fd.body(td.symbols(fid, base + emitted, n)):
+            r = bd.push(llr)
+            if r is not None:
+                out = r
+        emitted += n
+    if out is not None:
+        out["evm"] = fd.evm(fid)
+    return out
+
+
+def two_path(o, tx, snr_db=20.0, seed=11):
+    taps, dop, _ = Channel.paths_to_taps(
+        [{"amplitude": 1.0, "delay_ns": 0},
+         {"amplitude": 0.5, "delay_ns": 100, "phase_rad": 1.1}], FS)
+    return Channel(snr_db=snr_db, multipath_taps=taps, tap_doppler_hz=dop,
+                   sample_rate_hz=FS, tail_samples=4096, noise_draw_len=300_000,
+                   seed=seed, backend="numpy").process(o.generate_frame(tx))
+
+
+def assert_same_outcome(o, rx, chunk=1):
+    """Compare V1 and V2 INCLUDING their failures.
+
+    An uncorrectable codeword is a legitimate outcome, not a test error,
+    so "both raised" counts as equivalent. Checking only the success path
+    would quietly pass a V2 that fails everywhere V1 succeeds.
+    """
+    def attempt(fn):
+        try:
+            return "ok", fn()
+        except (ValueError, NotImplementedError) as exc:
+            return "raise", exc
+
+    s1, r1 = attempt(lambda: o.rx_process(rx))
+    s2, r2 = attempt(lambda: run_v2(o, rx, chunk))
+    assert s1 == s2, f"V1 {s1} but V2 {s2} ({r1!r} / {r2!r})"
+    if s1 == "raise":
+        return
+    np.testing.assert_array_equal(np.asarray(r2["bits"]), np.asarray(r1["bits"]))
+    np.testing.assert_array_equal(np.asarray(r2["crc_valid"]), np.asarray(r1["crc_valid"]))
+    np.testing.assert_allclose(np.asarray(r2["evm"]), np.asarray(r1["evm"]), rtol=1e-5)
+
+
+@pytest.mark.parametrize("modem", ["qpsk", "qam16", "qam64"])
+@pytest.mark.parametrize("dmrs_interval", [0, 32])
+def test_full_chain_matches_on_a_clean_channel(modem, dmrs_interval):
+    o = make_ofdm(modem, dmrs_interval)
+    assert_same_outcome(o, o.generate_frame(payload()))
+
+
+@pytest.mark.parametrize("soft", [True, False])
+@pytest.mark.parametrize("interleaver2", ["block", "none"])
+@pytest.mark.parametrize("scale", ["stream", "frame"])
+def test_full_chain_matches_through_a_two_path_channel(soft, interleaver2, scale):
+    """The arm that found the one real bug in this partition.
+
+    With `interleaver2="block"` and `scale="frame"`, FD emits the whole
+    frame as a single batch (frame scaling is non-causal), and BIT used to
+    infer the inner interleaver's block size as "total bits / number of
+    batches" -- which then became the whole frame and ran the inverse
+    permutation on the wrong geometry. `interleaver2="none"` passed
+    throughout, because with no permutation the block size does not
+    matter, which is exactly why the bug needed this cross-product to
+    show up. The block size now travels in `HeaderConfig`.
+    """
+    o = make_ofdm("qam16", 32, soft_decision=soft, interleaver2=interleaver2,
+                  soft_llr_scale=scale)
+    assert_same_outcome(o, two_path(o, payload()))
+
+
+@pytest.mark.parametrize("chunk", [1, 4, 8])
+def test_chunk_size_does_not_change_the_result(chunk):
+    """How many symbols ride in one FIFO message is a throughput knob and
+    must not be a correctness one. If this ever fails, some stage is
+    carrying state across a batch boundary that it should be deriving
+    per symbol."""
+    o = make_ofdm("qam16", 32)
+    assert_same_outcome(o, two_path(o, payload()), chunk=chunk)
+
+
+def test_fpga_soft_profile_matches():
+    """The `thresh_wq` metric is a separate path through FD's soft
+    demapper -- the 4-bit table lookup the FPGA implements
+    (`llr_weight.v`'s power-of-two weight) rather than max-log. It is the
+    profile the RTL is verified against, so V2 has to reproduce it too,
+    and it exercises `train_h2_sum` which the max-log path never touches.
+    """
+    o = make_ofdm("qam16", 32, soft_llr_metric="thresh_wq", soft_llr_bits=4,
+                  soft_llr_clip=3.0, soft_llr_scale="stream")
+    assert_same_outcome(o, two_path(o, payload()))
+
+
+# ---------------------------------------------- abort / invalidation ----
+
+def test_bit_domain_discards_chunks_that_arrive_after_an_abort():
+    """The ordering invariant, and the reason it is not obvious.
+
+    Control events travel on their own channel so a full data queue
+    cannot block the abort that the full queue caused. But that makes
+    control UNORDERED with respect to data: the abort for a frame arrives
+    before some of that frame's chunks. So aborting cannot just drop what
+    is currently held -- the id has to stay invalidated and discard
+    arrivals, or the late chunks start a fresh accumulator and a partial
+    frame reaches MAC.
+    """
+    # `scale="stream"` on purpose: the scenario needs FD to emit many
+    # batches, and under `Ofdm`'s default "frame" scaling FD correctly
+    # emits the whole frame as ONE batch (the scale is non-causal), which
+    # would leave nothing to arrive after the abort.
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    env = PhyEnv.from_ofdm(o)
+    bd = RxBitDomain(env)
+    fd = RxFreqDomain(env, soft_config_from(o))
+    fd.configure_expected_fec(o.fec, o.fec1)
+    td = RxTimeDomain(env)
+
+    rx = o.generate_frame(payload())
+    d = td.detect(rx)
+    fid = d["frame_id"]
+    fd.training(td.symbols(fid, 0, env.n_training_symbols, SymbolType.TRAIN))
+    cfg = fd.decode_header(td.symbols(
+        fid, env.n_training_symbols, env.num_symbols_header, SymbolType.HEADER))
+    base = env.n_training_symbols + env.num_symbols_header
+    batches = []
+    for i in range(cfg.n_total_slots):
+        batches.extend(fd.body(td.symbols(fid, base + i, 1)))
+    assert len(batches) >= 3
+
+    # Partway through, then the abort arrives ahead of the rest.
+    for llr in batches[:2]:
+        assert bd.push(llr) is None
+    bd.abort(fid)
+    assert bd.stats["partial_frames_discarded"] == 1
+
+    # Every late chunk -- including the one flagged `last`, which is what
+    # would otherwise trigger a decode -- must be discarded, and nothing
+    # may be returned to MAC.
+    for llr in batches[2:]:
+        assert bd.push(llr) is None
+    assert bd.stats["frames_decoded"] == 0
+    assert bd.stats["dropped_invalid"] == len(batches) - 2
+    assert fid not in bd._frames
+
+    # And the id is only released explicitly, not by the last chunk.
+    bd.retire(fid)
+    assert fid not in bd.invalidated
+
+
+def test_freq_domain_also_honours_a_sticky_abort():
+    """FD needs the same sticky invalidation as BIT: TD may already have
+    published symbols for an aborted frame, and FD must not resurrect it
+    by lazily re-creating frame state on the next arrival."""
+    o = make_ofdm("qam16")
+    env = PhyEnv.from_ofdm(o)
+    td, fd = RxTimeDomain(env), RxFreqDomain(env, soft_config_from(o))
+    fd.configure_expected_fec(o.fec, o.fec1)
+    d = td.detect(o.generate_frame(payload()))
+    fid = d["frame_id"]
+
+    fd.abort(fid)
+    fd.training(td.symbols(fid, 0, env.n_training_symbols, SymbolType.TRAIN))
+    assert fid not in fd._frames
+    assert fd.stats["dropped_invalid"] >= 1

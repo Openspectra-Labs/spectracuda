@@ -63,6 +63,14 @@ class PhyEnv:
     channel_estimator: Any
     header_modem: Any
     train_known_indices: Any
+    # The header's bits are SPREAD across the header symbols' subcarriers
+    # (plus scrambled) rather than packed densely into the first slots --
+    # a PAPR fix, see `Ofdm`'s class docstring. So the demapped wire bits
+    # must be gathered through these positions before decoding, never
+    # plain-sliced.
+    header_positions_flat: Any
+    header_scramble_seed: int
+    pilot_values: Any
 
     # --- out-of-band receiver configuration ---------------------------
     # The interleaver is NEVER signalled over the air (see
@@ -106,6 +114,9 @@ class PhyEnv:
             channel_estimator=ofdm.channel_estimator,
             header_modem=ofdm.header_modem,
             train_known_indices=ofdm._train_known_indices,
+            header_positions_flat=ofdm._header_positions_flat,
+            header_scramble_seed=42,
+            pilot_values=ofdm.pilot_values,
             interleaver=ofdm.interleaver,
             interleaver_kwargs=dict(ofdm.interleaver_kwargs),
             interleaver2=ofdm.interleaver2,

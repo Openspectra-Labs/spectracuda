@@ -142,6 +142,15 @@ class HeaderConfig:
     n_c2_symbols: int
     n_data_total: int
     n_total_slots: int
+    # Coded bits in ONE payload OFDM symbol, from the DECODED modem --
+    # the inner interleaver's block size. It is carried here rather than
+    # inferred downstream from "total bits / number of batches", which
+    # was a real bug: in frame-scaling mode FD emits the whole frame as a
+    # single batch, so the inferred block became the whole frame and the
+    # inverse permutation silently ran on the wrong geometry. It also must
+    # not come from the receiver's own `bits_per_ofdm_symbol`, which need
+    # not match the frame's modulation.
+    bits_per_symbol_payload: int = 0
     fields: Dict[str, Any] = field(default_factory=dict)
 
 
