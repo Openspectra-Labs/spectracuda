@@ -548,8 +548,7 @@ class TdStream:
             res = self.td.sync.process(span)
             metric = float(np.asarray(self.td._to_host(res["metric"]))[0])
             rel = int(np.asarray(self.td._to_host(res["start_index"]))[0])
-            absolute = self.base_offset + cursor + rel
-
+            absolute = self._refine(cursor + rel, buf_len)
             accept = metric >= env.sync_threshold
             # Trailing-edge guard, measured against the WHOLE buffer: a
             # partially-arrived preamble scores 0.73 with seven eighths
@@ -593,6 +592,40 @@ class TdStream:
             else:
                 cursor += stride
         return found
+
+    def _refine(self, rel_peak: int, buf_len: int) -> int:
+        """Re-locate a peak in a window derived from the PEAK, not from
+        the scan grid, and return its ABSOLUTE position.
+
+        Why this is required, not a refinement for its own sake. The
+        coarse scan walks fixed-stride windows, so a preamble sitting
+        near a window edge can be won by a partially-covered correlation
+        in the earlier window and reported EARLY. The grid's alignment
+        depends on `base_offset`, which depends on when trimming happened,
+        which under threading depends on scheduling -- so the SAME signal
+        was detected at different offsets from run to run.
+
+        Measured: with 12 back-to-back frames, the threaded flowgraph
+        placed frames 24 samples early (harmless -- inside the cp_len=32
+        cyclic prefix, absorbed by h_hat) and one frame 48 samples early,
+        which is outside the CP. That one came out with ~11% of its bits
+        wrong in every symbol and failed Reed-Solomon. The serial driver,
+        trimming at different moments, got it right -- so this was
+        intermittent and looked like a data race.
+
+        Centring the window on the candidate makes the answer a function
+        of the candidate alone, so nearby candidates converge to the same
+        peak and the result no longer depends on scan alignment.
+        """
+        env = self.env
+        lo = max(0, rel_peak - env.fft_size)
+        hi = min(buf_len, rel_peak + 2 * env.fft_size)
+        span = self.buffer[:, lo:hi]
+        if int(span.shape[-1]) < env.fft_size:
+            return self.base_offset + rel_peak
+        res = self.td.sync.process(span)
+        best = int(np.asarray(self.td._to_host(res["start_index"]))[0])
+        return self.base_offset + lo + best
 
     # ---- output ------------------------------------------------------
 

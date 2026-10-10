@@ -827,3 +827,95 @@ def test_report_exposes_per_stage_occupancy_and_queue_pressure():
     for name in ("iq", "i1", "i2"):
         q = report["queues"][name]
         assert q["put"] > 0 and q["high_water"] <= q["maxsize"]
+
+
+def test_detection_offset_does_not_depend_on_scan_alignment():
+    """The regression test for the worst bug in this work.
+
+    TD scans the buffer in fixed-stride windows, and a preamble near a
+    window edge could be won by a partially-covered correlation in the
+    EARLIER window and reported early. The grid's alignment depends on
+    `base_offset`, which depends on when the buffer was trimmed, which
+    under threading depends on scheduling -- so the same signal was
+    detected at different offsets from run to run.
+
+    With 12 back-to-back frames the threaded flowgraph placed several
+    frames 24 samples early (harmless: inside the cp_len=32 cyclic
+    prefix, absorbed by h_hat) and one 48 samples early, which is
+    OUTSIDE the CP. That frame came out with ~11% of its bits wrong in
+    every symbol and failed Reed-Solomon, intermittently, while the
+    serial driver -- trimming at different moments -- got it right. It
+    looked exactly like a data race and was not one.
+
+    So: many frames, serial and threaded, and the detected starts must
+    agree exactly. Not "within the CP" -- exactly, because tolerating
+    drift here is what hid the bug.
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    txs, parts = [], [gap(800)]
+    for seed in range(8):
+        tx = payload(600, seed=seed)
+        txs.append(tx)
+        parts += [o.generate_frame(tx), gap(300)]
+    parts.append(gap(3000))
+    sig = concat(*parts)
+
+    def detected_starts(stream):
+        found = {}
+        original = stream.td.begin_stream_frame
+
+        def spy(buf, rel, metric, *, base_offset):
+            fid = original(buf, rel, metric, base_offset=base_offset)
+            found[fid] = base_offset + rel
+            return fid
+
+        stream.td.begin_stream_frame = spy
+        return found
+
+    st = RxPipeline(PhyEnv.from_ofdm(o), soft=soft_config_from(o),
+                    expected_fec=(o.fec, o.fec1), chunk_symbols=4)
+    serial = detected_starts(st.stream)
+    serial_frames = drive(st, sig)
+    assert len(serial_frames) == len(txs)
+
+    for _ in range(3):
+        fg = RxFlowgraph(PhyEnv.from_ofdm(o), soft=soft_config_from(o),
+                         expected_fec=(o.fec, o.fec1), chunk_symbols=4,
+                         queue_depth=256)
+        threaded = detected_starts(fg.stream)
+        fg.start()
+        try:
+            for i in range(0, sig.shape[-1], 2048):
+                fg.feed(sig[:, i:i + 2048])
+            got = fg.drain()
+        finally:
+            fg.stop()
+        assert sorted(threaded.values()) == sorted(serial.values()), \
+            "detection offsets drifted between serial and threaded"
+        assert len(got) == len(txs), f"lost frames: {len(got)}/{len(txs)}"
+        for tx in txs:
+            assert matches(got, tx)
+
+
+@pytest.mark.parametrize("n_frames,chunk_symbols", [(8, 1), (8, 4), (16, 8)])
+def test_many_back_to_back_frames_survive_the_flowgraph(n_frames, chunk_symbols):
+    """Three frames was not enough to expose the detection-alignment bug.
+
+    It needed many frames back to back, because the fault depended on
+    where trimming had moved `base_offset` by the time a given preamble
+    was scanned -- which only varies once frames keep arriving.
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    txs, parts = [], [gap(800)]
+    for seed in range(n_frames):
+        tx = payload(400, seed=seed)
+        txs.append(tx)
+        parts += [o.generate_frame(tx), gap(300)]
+    parts.append(gap(3000))
+
+    got, report = run_threaded(o, concat(*parts), chunk_symbols=chunk_symbols,
+                               queue_depth=256)
+    assert len(got) == n_frames, f"{len(got)}/{n_frames} decoded"
+    for tx in txs:
+        assert matches(got, tx)
+    assert report["pipeline"]["payload_failed"] == 0

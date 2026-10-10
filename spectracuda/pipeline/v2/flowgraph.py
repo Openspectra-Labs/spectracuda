@@ -257,18 +257,38 @@ class RxFlowgraph:
         of a bounded queue -- the alternative is an unbounded backlog."""
         self.q_iq.put_blocking(chunk)
 
-    def drain(self, timeout: float = 30.0) -> List[Dict[str, Any]]:
-        """Wait for everything in flight, then stop and return results.
+    def drain(self, timeout: float = 30.0, *, settle_polls: int = 4,
+              poll_s: float = 0.02) -> List[Dict[str, Any]]:
+        """Wait for QUIESCENCE, then stop and return results.
 
-        Sorted by `frame_id`, never by completion order: completion order
-        is genuinely timing-dependent, and a caller that saw it could not
-        be deterministic even though the pipeline is.
+        Testing each queue for "empty" in turn is NOT a quiescence test,
+        and getting that wrong was an intermittent frame loss: TD refills
+        q_i1 after it has been declared empty, `stop()` then fires with
+        work still in flight, and frames in progress are lost. So this
+        waits until the queues are empty AND no stage has made progress
+        for `settle_polls` consecutive polls.
+
+        Results come back sorted by `frame_id`, never in completion
+        order -- completion order is genuinely timing-dependent, so a
+        caller who observed it could not be deterministic even though the
+        pipeline is.
         """
         deadline = time.monotonic() + timeout
-        for q in (self.q_iq, self.q_i1, self.q_i2):
-            q.join_empty(deadline)
-        # A short settle so a batch already taken off a queue can finish.
-        time.sleep(0.05)
+        quiet = 0
+        last = None
+        while time.monotonic() < deadline:
+            empty = all(q.qsize() == 0 for q in (self.q_iq, self.q_i1, self.q_i2))
+            now = tuple(w.items for w in self.workers.values())
+            # TD may still owe symbols for a frame it has not released.
+            td_pending = len(self._td_state)
+            if empty and now == last and td_pending == 0:
+                quiet += 1
+                if quiet >= settle_polls:
+                    break
+            else:
+                quiet = 0
+            last = now
+            time.sleep(poll_s)
         self.stop()
         with self._out_lock:
             return [self._out[k] for k in sorted(self._out)]
@@ -294,8 +314,14 @@ class RxFlowgraph:
         """
         w = self.workers["td"]
         env = self.env
+        # A SHORT idle poll, deliberately. TD owes symbols to frames whose
+        # samples have already arrived, and it emits them from _td_pump --
+        # so the poll interval is this stage's output latency, not just an
+        # idle cost. At the queue's 0.1 s default, the last frame of a
+        # burst waited up to 100 ms for a pump, which on a 0.4 s run was
+        # most of the measured gap against the serial driver.
         while not w.stop.is_set():
-            chunk = self.q_iq.get()
+            chunk = self.q_iq.get(timeout=0.002)
             if chunk is None:
                 self._td_pump(w)         # keep emitting even when input idles
                 continue
@@ -347,7 +373,14 @@ class RxFlowgraph:
                     self._td_state.pop(fid, None)
                     break
                 if not self.q_i1.put_backpressure(batch, w.stop):
-                    break              # shutting down, not overflow
+                    # Refused only on shutdown -- but the frame is now
+                    # incomplete, and FD would still emit `last` later,
+                    # letting BIT decode a frame with a HOLE in it. That
+                    # was a real, intermittent RS failure. Abort instead.
+                    self.control.publish(FrameAbort(frame_id=fid,
+                                                    reason="shutdown mid-frame"))
+                    self._td_state.pop(fid, None)
+                    break
                 st["emitted"] += n
                 progressed = True
             if progressed:
@@ -434,7 +467,13 @@ class RxFlowgraph:
             return
         for llr in self.fd.body(batch):
             if not self.q_i2.put_backpressure(llr, self.workers["fd"].stop):
-                return                 # shutting down
+                # Same hazard on this side: dropping one LlrBatch and
+                # later delivering the frame's `last` would hand BIT a
+                # frame missing a symbol, which decodes to garbage rather
+                # than failing cleanly.
+                self.control.publish(FrameAbort(frame_id=batch.frame_id,
+                                                reason="shutdown mid-frame"))
+                return
 
     def _run_bit(self) -> None:
         w = self.workers["bit"]
