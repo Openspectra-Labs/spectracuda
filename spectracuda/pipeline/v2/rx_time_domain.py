@@ -277,13 +277,20 @@ class RxTimeDomain(Block):
         self.stats["frames_started"] += 1
         return frame_id
 
-    def extend_stream_frame(self, frame_id: int, buffer: Any, base_offset: int) -> None:
-        """Re-correct the frame's span now that more samples have arrived.
+    def extend_stream_frame(self, frame_id: int, buffer: Any, base_offset: int,
+                            need_len: int = -1) -> None:
+        """Correct this frame's samples up to `need_len`, and no further.
 
-        Corrected from `abs_start` every time, for the phase reason given
-        on `FrameSync.abs_start`. Only grows, and only when it has to.
+        `need_len` matters as much as the incremental tail below. The span
+        available always runs to the END of the buffer, so correcting all
+        of it meant every open frame also corrected the samples belonging
+        to the frames AFTER it -- 2.6x the signal's samples across the
+        run, for data those frames correct again themselves. Bounding the
+        work by what the requested symbols actually need removes that
+        entirely; -1 means "everything available", for callers that have
+        no better bound.
         """
-        env = self.env
+        env, xp = self.env, self.env.xp
         fs = self._frames[frame_id]
         begin = fs.abs_start - base_offset
         if begin < 0:
@@ -547,9 +554,19 @@ class TdStream:
         if buf_len < env.fft_size:
             return found                   # not even one preamble's worth
 
-        win = 2 * env.fft_size + L
-        stride = env.fft_size
+        # Window and stride sized from the MINIMUM FRAME LENGTH, not
+        # picked by feel. A frame is at least preamble + training +
+        # header = fft_size + (n_train + n_header) * slot_len samples, so
+        # a window shorter than that can contain at most one preamble --
+        # which is what lets the loop take peaks in time order safely.
+        # Stride is the window less the preamble and the guard, the
+        # largest step that still contains every preamble wholly in some
+        # window. The previous 2*fft_size window forced stride=fft_size
+        # and re-correlated 4.5x the signal; this cuts the redundancy to
+        # window/stride without weakening either guarantee.
         min_frame = env.fft_size + self._min_extent * env.slot_len
+        win = min(4 * env.fft_size + L, min_frame - 1)
+        stride = max(env.fft_size, win - env.fft_size - L)
         # Resume where the last scan stopped, overlapping by one window so
         # a preamble straddling that boundary is still found whole. `_seen`
         # already suppresses a re-detection inside the overlap.
@@ -715,7 +732,11 @@ class TdStream:
         streaming the samples these symbols need may have arrived long
         after the frame was opened.
         """
-        self.td.extend_stream_frame(frame_id, self.buffer, self.base_offset)
+        # Correct exactly as far as these symbols reach, no further.
+        env = self.env
+        need = (env.fft_size - env.timing_advance
+                + (symbol_offset + n_sym) * env.slot_len)
+        self.td.extend_stream_frame(frame_id, self.buffer, self.base_offset, need)
         batch = self.td.symbols(frame_id, symbol_offset, n_sym, stype)
         # `sample_offset` must be ABSOLUTE on the wire, and `td.symbols`
         # computes it against the frame's own corrected array. Re-base it

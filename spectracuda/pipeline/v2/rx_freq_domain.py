@@ -370,10 +370,22 @@ class RxFreqDomain(Block):
     def body(self, batch: FftBatch) -> List[LlrBatch]:
         """Classify, refresh H[k] on DMRS, equalize, CPE-correct, demap.
 
-        Returns zero or more `LlrBatch`es: zero when every symbol in the
-        batch was DMRS (consumed here -- DMRS never leaves FD) or when the
-        frame is already complete, and zero in frame-scaling mode until
-        the frame's last symbol arrives.
+        VECTORIZED OVER THE BATCH, which is the whole reason a large
+        `chunk_symbols` pays. An earlier version looped per symbol and
+        made five Python-level DSP calls each time; `Ofdm` instead folds
+        (frames x symbols) into one combined axis and lets numpy's C loop
+        do the repetition, and its own comment says why -- the per-call
+        overhead otherwise dominates. Looping here threw that away and
+        was most of why the split ran slower than the class it replaced.
+
+        The batch is split into RUNS of consecutive DATA symbols, because
+        H[k] only changes at a DMRS: every symbol in a run shares one
+        channel estimate, so a run equalizes, CPE-corrects and demaps in
+        one call each. DMRS symbols are consumed here and never leave FD.
+
+        Returns zero or more `LlrBatch`es -- zero when the batch was all
+        DMRS, when the frame is already complete, or in frame-scaling
+        mode before the frame's last symbol.
         """
         env, xp = self.env, self.env.xp
         if not self._live(batch.frame_id):
@@ -388,58 +400,75 @@ class RxFreqDomain(Block):
             return []
         cfg = fs.header
 
-        out: List[LlrBatch] = []
-        for i in range(batch.n_sym):
-            if fs.slot_cursor >= cfg.n_total_slots:
-                break                       # past the frame; TD over-emits by design
-            kind = int(np.asarray(fs.slot_map)[fs.slot_cursor])
-            fs.slot_cursor += 1
-            bins = batch.bins[i:i + 1, :]
+        # How much of this batch belongs to the frame at all.
+        avail = min(batch.n_sym, cfg.n_total_slots - fs.slot_cursor)
+        if avail <= 0:
+            return []                       # past the frame; TD over-emits by design
+        kinds = np.asarray(fs.slot_map)[fs.slot_cursor:fs.slot_cursor + avail]
 
-            if kind == _dmrs.DMRS_SLOT:
+        out: List[LlrBatch] = []
+        i = 0
+        while i < avail:
+            if int(kinds[i]) == _dmrs.DMRS_SLOT:
                 # A DMRS *is* the training symbol re-transmitted, so it
                 # goes through the identical estimator path -- if the two
                 # ever diverged, segment 0 and segments 1+ would be
                 # estimates of subtly different things while looking
                 # equally plausible.
+                bins = batch.bins[i:i + 1, :]
                 h_full = self.channel_estimator.process(bins[:, env.train_known_indices])
                 fs.h_data = h_full[:, env.grid.data_indices]
                 fs.h_pilots = h_full[:, env.grid.pilot_indices]
                 self.stats["dmrs_refreshes"] += 1
+                fs.slot_cursor += 1
+                i += 1
                 continue
 
-            eq = self._equalize_and_correct(fs, bins)
-            self.stats["data_symbols"] += 1
-            is_last = (fs.data_emitted + 1 == cfg.n_data_total)
+            # A run of consecutive DATA symbols, all sharing this H[k].
+            j = i
+            while j < avail and int(kinds[j]) != _dmrs.DMRS_SLOT:
+                j += 1
+            run = batch.bins[i:j, :]
+            n_run = j - i
+            eq = self._equalize_and_correct(fs, run)
+            self.stats["data_symbols"] += n_run
+            fs.slot_cursor += n_run
 
             if self.soft.is_causal or not self.soft.enabled:
-                out.append(self._emit(fs, eq, fs.h_data, is_last))
+                out.extend(self._emit_run(fs, eq, n_run))
             else:
-                # Frame-mode scaling is non-causal, so hold the symbol.
+                # Frame-mode scaling is non-causal, so hold the run.
                 fs.buffered_eq.append(eq)
-                fs.buffered_h.append(fs.h_data)
-                fs.data_emitted += 1
-                if is_last:
+                fs.buffered_h.append(xp.repeat(fs.h_data, n_run, axis=0))
+                fs.data_emitted += n_run
+                if fs.data_emitted >= cfg.n_data_total:
                     out.extend(self._flush_frame_mode(fs))
-                continue
-            fs.data_emitted += 1
+            i = j
         return out
 
     def _equalize_and_correct(self, fs: _FrameState, bins: Any) -> Any:
-        """Equalize one symbol and remove its common phase error.
+        """Equalize a RUN of symbols and remove each one's common phase
+        error, one vectorized call per step.
 
-        The CPE term is measured from the symbol's OWN pilots, equalized
+        Every symbol in the run shares `fs.h_data` (H only changes at a
+        DMRS), so the estimate is broadcast over the run rather than
+        re-applied per symbol.
+
+        The CPE term is measured from each symbol's OWN pilots, equalized
         through the same equalizer as the data: the static channel gain at
         the pilot subcarriers is not 1.0 in general, so comparing raw
         pilots would fold channel response into what is meant to be a
         pure drift measurement.
         """
         env, xp = self.env, self.env.xp
+        n = int(bins.shape[0])
         rx_data = env.grid.extract_data(xp, bins)
-        eq = self.equalizer.process(rx_data, channel_est=fs.h_data)
+        h_data = fs.h_data if n == 1 else xp.repeat(fs.h_data, n, axis=0)
+        eq = self.equalizer.process(rx_data, channel_est=h_data)
 
         pilots_rx = env.grid.extract_pilots(xp, bins)
-        eq_pilots = self.equalizer.process(pilots_rx, channel_est=fs.h_pilots)
+        h_pilots = fs.h_pilots if n == 1 else xp.repeat(fs.h_pilots, n, axis=0)
+        eq_pilots = self.equalizer.process(pilots_rx, channel_est=h_pilots)
         ratio = eq_pilots / xp.tile(self._pilot_values, (eq_pilots.shape[0], 1))
         ratio_mean = xp.mean(ratio, axis=-1)
         cpe = xp.angle(ratio_mean)
@@ -447,23 +476,32 @@ class RxFreqDomain(Block):
         # agree and collapses toward 0 when they are scattered (a deep
         # fade). Leave such a symbol uncorrected rather than rotating it
         # by a phase averaged out of noise.
-        reliable = xp.abs(ratio_mean) > 0.05
-        cpe = xp.where(reliable, cpe, xp.zeros_like(cpe))
+        cpe = xp.where(xp.abs(ratio_mean) > 0.05, cpe, xp.zeros_like(cpe))
         return eq * xp.exp(-1j * cpe)[:, None]
 
-    def _emit(self, fs: _FrameState, eq: Any, h: Any, is_last: bool) -> LlrBatch:
-        """Demap one symbol, accumulate its EVM power sums, package it."""
+    def _emit_run(self, fs: _FrameState, eq: Any, n_run: int) -> List[LlrBatch]:
+        """Demap a whole run in one call and package it as ONE LlrBatch.
+
+        One batch per run, not per symbol: BIT concatenates them anyway
+        (it must, since the outer interleaver is frame-sized), so a finer
+        split buys nothing downstream and costs a queue round-trip and a
+        Python call per symbol upstream.
+        """
         env = self.env
+        cfg = fs.header
         hard, err, ref = fs.payload_modem.demodulate_stats(eq)
         fs.evm_err += float(self._to_host(err).sum())
         fs.evm_ref += float(self._to_host(ref).sum())
-        llrs = self._soft_for(fs, eq, h) if (self.soft.enabled and fs.payload_modem) else None
+        llrs = self._soft_for(fs, eq, n_run) if self.soft.enabled else None
         header = fs.header if fs.data_emitted == 0 else None
-        return LlrBatch(
-            frame_id=fs.frame_id, symbol_offset=fs.data_emitted,
+        first = fs.data_emitted
+        fs.data_emitted += n_run
+        return [LlrBatch(
+            frame_id=fs.frame_id, symbol_offset=first,
             llrs=llrs, hard_bits=hard.reshape(-1),
-            stype=SymbolType.DATA, header=header, last=is_last,
-        )
+            stype=SymbolType.DATA, header=header,
+            last=(fs.data_emitted >= cfg.n_data_total),
+        )]
 
     def _flush_frame_mode(self, fs: _FrameState) -> List[LlrBatch]:
         """Demap a held frame once the non-causal scale can be computed.
@@ -491,7 +529,7 @@ class RxFreqDomain(Block):
             stype=SymbolType.DATA, header=fs.header, last=True,
         )]
 
-    def _soft_for(self, fs: _FrameState, eq: Any, h: Any) -> Any:
+    def _soft_for(self, fs: _FrameState, eq: Any, n_run: int) -> Any:
         """One symbol's soft values under a CAUSAL scale.
 
         Every term here is known before the payload starts: the noise from
@@ -502,11 +540,12 @@ class RxFreqDomain(Block):
         """
         env, xp = self.env, self.env.xp
         metric = self.soft.metric
+        h = fs.h_data if n_run == 1 else xp.repeat(fs.h_data, n_run, axis=0)
         if metric in ("thresh_w", "thresh_wq"):
             # |H[k]|^2 / mean rounded to a power of two and clamped to
             # [1/8, 2] -- exactly the RTL's comparisons in llr_weight.v.
             h2 = xp.abs(h) ** 2
-            ref = fs.train_h2_sum[:, None] * float(np.sqrt(2.0))
+            ref = xp.repeat(fs.train_h2_sum, n_run)[:, None] * float(np.sqrt(2.0))
             kexp = xp.full(h2.shape, -3, dtype="int64")
             for mm in (-3, -2, -1, 0):
                 kexp = kexp + (h2 * env.grid.n_data >= ref * (2.0 ** mm))
@@ -514,7 +553,8 @@ class RxFreqDomain(Block):
                 return fs.payload_modem.demodulate_soft_tableq(eq, kexp).reshape(-1)
             return fs.payload_modem.demodulate_soft_thresh(
                 eq, kexp, llr_bits=self.soft.bits or 4).reshape(-1)
-        w = xp.abs(h) ** 2 / (fs.stream_h2_mean * fs.stream_noise)[:, None]
+        w = xp.abs(h) ** 2 / xp.repeat(
+            fs.stream_h2_mean * fs.stream_noise, n_run)[:, None]
         return fs.payload_modem.demodulate_soft(
             eq, weight=w, llr_clip=self.soft.clip,
             llr_bits=self.soft.bits, sigma2=1.0).reshape(-1)
