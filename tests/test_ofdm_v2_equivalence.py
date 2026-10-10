@@ -24,11 +24,15 @@ for reasons unrelated to the partition -- see `SoftConfig`'s docstring.
 """
 from __future__ import annotations
 
+import random
+import time
+
 import numpy as np
 import pytest
 
 from spectracuda.pipeline import Ofdm
 from spectracuda.pipeline.v2.env import PhyConfig, PhyEnv
+from spectracuda.pipeline.v2.flowgraph import RxFlowgraph
 from spectracuda.pipeline.v2.rx_bit_domain import RxBitDomain
 from spectracuda.pipeline.v2.rx_freq_domain import RxFreqDomain
 from spectracuda.pipeline.v2.rx_pipeline import RxPipeline
@@ -671,3 +675,155 @@ def test_stages_own_their_blocks_rather_than_sharing_them():
     # stage boundary either.
     assert {id(a.td.sync), id(a.td.cfo), id(a.td.demod)}.isdisjoint(
         {id(a.fd.equalizer), id(a.fd.channel_estimator), id(a.fd.header_modem)})
+
+
+# ------------------------------------------------------- flowgraph -----
+#
+# Step 4: the three stages as threads behind bounded queues. Everything
+# before this existed to make these tests meaningful -- the partition is
+# bit-exact, the streaming FSM is robust, and no stateful block is shared
+# -- so a failure here is a CONCURRENCY failure and nothing else.
+
+
+def frames_signature(results):
+    """A comparable fingerprint of a run's output.
+
+    Keyed and sorted by `frame_id`, never by completion order: completion
+    order is genuinely timing-dependent, so a caller who observed it
+    could not be deterministic even though the pipeline is.
+    """
+    return [(r["frame_id"], np.asarray(r["bits"]).tobytes(),
+             bool(np.asarray(r["crc_valid"])[0]))
+            for r in sorted(results, key=lambda x: x["frame_id"])]
+
+
+def three_frames(o):
+    txs = [payload(n, seed=s) for s, n in ((1, 120), (2, 600), (3, 64))]
+    parts = [gap(800)]
+    for tx in txs:
+        parts += [o.generate_frame(tx), gap(300)]
+    parts.append(gap(3000))
+    return txs, concat(*parts)
+
+
+def run_threaded(o, sig, *, chunk=2048, stalls=None, queue_depth=64,
+                 chunk_symbols=1):
+    fg = RxFlowgraph(PhyEnv.from_ofdm(o), soft=soft_config_from(o),
+                     expected_fec=(o.fec, o.fec1), chunk_symbols=chunk_symbols,
+                     queue_depth=queue_depth).start()
+    try:
+        for i in range(0, sig.shape[-1], chunk):
+            fg.feed(sig[:, i:i + chunk])
+            if stalls is not None and stalls.random() < 0.4:
+                time.sleep(stalls.uniform(0.001, 0.02))
+        return fg.drain(), fg.report()
+    finally:
+        fg.stop()
+
+
+def test_threaded_output_is_identical_to_single_threaded():
+    """Concurrency must add throughput, not change answers."""
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    txs, sig = three_frames(o)
+
+    st = RxPipeline(PhyEnv.from_ofdm(o), soft=soft_config_from(o),
+                    expected_fec=(o.fec, o.fec1))
+    reference = frames_signature(drive(st, sig))
+    assert len(reference) == len(txs)
+
+    got, _ = run_threaded(o, sig)
+    assert frames_signature(got) == reference
+    for tx in txs:
+        assert matches(got, tx)
+
+
+def test_threaded_runs_are_deterministic_including_under_stalls():
+    """Output that depends on thread timing is broken, so this perturbs
+    the interleaving on purpose and demands the same bytes anyway.
+
+    Determinism holds structurally rather than by luck: each frame is
+    processed independently, every stage keys its per-frame state by
+    `frame_id`, and the queues preserve order within a stage.
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    _, sig = three_frames(o)
+
+    baseline, _ = run_threaded(o, sig)
+    reference = frames_signature(baseline)
+    assert reference, "nothing decoded, so the comparison would be vacuous"
+
+    for trial in range(3):
+        plain, _ = run_threaded(o, sig)
+        assert frames_signature(plain) == reference
+        stalled, _ = run_threaded(o, sig, stalls=random.Random(trial))
+        assert frames_signature(stalled) == reference
+
+
+@pytest.mark.parametrize("chunk_symbols", [1, 4])
+def test_threaded_works_at_several_fd_batch_sizes(chunk_symbols):
+    """`chunk_symbols=1` is what found the real bug in this step.
+
+    FD's `training()` had summed only WITHIN one batch while dividing by
+    `n_training_symbols`, so a one-symbol batch yielded half of one
+    symbol's channel estimate and the next batch overwrote it. Nothing
+    raised -- the estimate was simply wrong and the header then failed to
+    decode. The single-threaded driver always requested the whole
+    training run in one call, so it stayed latent until threads chunked
+    it.
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    txs, sig = three_frames(o)
+    got, report = run_threaded(o, sig, chunk_symbols=chunk_symbols)
+    for tx in txs:
+        assert matches(got, tx)
+    # No spurious failures either. TD overshoots every frame on purpose,
+    # so surplus batches arrive after a frame completes; they must be
+    # counted as surplus rather than mistaken for unknown frames. Before
+    # FD distinguished "finished" from "forgotten", a perfect run
+    # reported up to 3 aborts and 3 header failures.
+    assert report["pipeline"]["header_failed"] == 0
+    assert report["pipeline"]["aborted"] == 0
+
+
+def test_internal_queues_apply_backpressure_rather_than_dropping():
+    """Dropping is only correct where data would otherwise be lost.
+
+    Between stages the producer still holds its input -- TD's samples are
+    in TD's own buffer -- so stalling costs nothing while dropping
+    destroys a frame. An earlier version dropped here and TD, which runs
+    to its cap and therefore overshoots every short frame, filled the
+    queue and aborted real frames with `i1 overflow`: 0 of 3 frames
+    survived. A deliberately tiny queue now proves the opposite.
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    txs, sig = three_frames(o)
+    got, report = run_threaded(o, sig, queue_depth=2)
+
+    for tx in txs:
+        assert matches(got, tx), "backpressure must not cost a frame"
+    assert report["pipeline"]["overflow_aborts"] == 0
+    assert report["queues"]["i1"]["dropped"] == 0
+    # And it really was constrained, so the test is not vacuous: the
+    # queue reached its own ceiling. (`blocked_puts` is NOT a reliable
+    # witness -- it only counts puts that waited out a full timeout, and
+    # FD usually drains fast enough that none do.)
+    assert report["queues"]["i1"]["high_water"] == report["queues"]["i1"]["maxsize"]
+
+
+def test_report_exposes_per_stage_occupancy_and_queue_pressure():
+    """A pipeline runs no faster than its slowest stage, so per-stage
+    busy time and per-queue high-water are the measurements that make
+    step 7 answerable. They ship with the flowgraph rather than being
+    retrofitted, because otherwise the first numbers anyone collects are
+    the ones nobody can explain."""
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    _, sig = three_frames(o)
+    _, report = run_threaded(o, sig)
+
+    assert set(report["stages"]) == {"td", "fd", "bit"}
+    for name, s in report["stages"].items():
+        assert s["items"] > 0, f"{name} did no work"
+        assert s["busy_s"] >= 0.0
+    for name in ("iq", "i1", "i2"):
+        q = report["queues"][name]
+        assert q["put"] > 0 and q["high_water"] <= q["maxsize"]

@@ -83,6 +83,10 @@ class _FrameState:
     frame_id: int
     h_data: Any = None
     h_pilots: Any = None
+    # Training accumulators: the run can span several batches.
+    h_data_sum: Any = None
+    h_pilots_sum: Any = None
+    train_seen: int = 0
     train_h2_sum: Any = None
     stream_noise: Any = None
     stream_h2_mean: Any = None
@@ -130,8 +134,15 @@ class RxFreqDomain(Block):
         self._modem_cache: Dict[str, Any] = {}
         self._frames: Dict[int, _FrameState] = {}
         self.invalidated: set = set()
+        # Frames that COMPLETED. Distinct from `invalidated`, and both are
+        # needed: TD overshoots every frame on purpose, so batches keep
+        # arriving after a frame is done and must be dropped as surplus
+        # rather than mistaken for a new frame. See `retire`.
+        self.finished: set = set()
+        self._finished_cap = 256
         self.stats = {"headers_decoded": 0, "header_failures": 0,
-                      "dmrs_refreshes": 0, "data_symbols": 0, "dropped_invalid": 0}
+                      "dmrs_refreshes": 0, "data_symbols": 0,
+                      "dropped_invalid": 0, "dropped_surplus": 0}
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -147,13 +158,36 @@ class RxFreqDomain(Block):
         self.invalidated.add(frame_id)
 
     def retire(self, frame_id: int) -> None:
-        """Release a completed frame and stop invalidating its id."""
+        """Mark a frame FINISHED and release its state.
+
+        Finished is not the same as forgotten, and the difference is a
+        bug this cost. In the threaded flowgraph TD cannot know how long
+        a frame is, so it overshoots past the end on purpose; those
+        surplus batches arrive here AFTER the frame completed. If the id
+        were simply dropped, each one would look like an unknown frame,
+        `body()` would raise "body before header", and a perfectly good
+        run reported up to 3 spurious aborts and header failures. Keeping
+        the id lets the surplus be discarded silently, which is what it
+        is.
+        """
         self._frames.pop(frame_id, None)
         self.invalidated.discard(frame_id)
+        self.finished.add(frame_id)
+        self._prune_finished()
+
+    def _prune_finished(self) -> None:
+        """Bound the finished set: only ids near the live window matter."""
+        if len(self.finished) > self._finished_cap:
+            keep = sorted(self.finished)[-self._finished_cap:]
+            self.finished = set(keep)
 
     def _live(self, frame_id: int) -> bool:
         if frame_id in self.invalidated:
             self.stats["dropped_invalid"] += 1
+            return False
+        if frame_id in self.finished:
+            # Surplus from TD's deliberate overshoot, not an error.
+            self.stats["dropped_surplus"] += 1
             return False
         return True
 
@@ -173,16 +207,29 @@ class RxFreqDomain(Block):
             return
         fs = self._frames.setdefault(batch.frame_id, _FrameState(batch.frame_id))
 
-        h_data_sum = h_pilots_sum = None
+        # ACCUMULATED ACROSS BATCHES, not within one. The training run
+        # may arrive as several batches -- it does whenever
+        # `chunk_symbols` is smaller than `n_training_symbols`, which is
+        # the default in the threaded flowgraph. An earlier version
+        # summed only within a batch and divided by n_training_symbols
+        # anyway, so a one-symbol batch produced HALF of one symbol's
+        # estimate and the next batch overwrote it. Nothing raised; the
+        # channel estimate was simply wrong, and the header then failed
+        # to decode. The single-threaded driver always asked for the
+        # whole run at once, so the bug was latent until threads chunked
+        # it.
         for i in range(batch.n_sym):
             known = batch.bins[i:i + 1, :][:, env.train_known_indices]
             h_full = self.channel_estimator.process(known)
             h_d = h_full[:, env.grid.data_indices]
             h_p = h_full[:, env.grid.pilot_indices]
-            h_data_sum = h_d if h_data_sum is None else h_data_sum + h_d
-            h_pilots_sum = h_p if h_pilots_sum is None else h_pilots_sum + h_p
-        fs.h_data = h_data_sum / env.n_training_symbols
-        fs.h_pilots = h_pilots_sum / env.n_training_symbols
+            fs.h_data_sum = h_d if fs.h_data_sum is None else fs.h_data_sum + h_d
+            fs.h_pilots_sum = h_p if fs.h_pilots_sum is None else fs.h_pilots_sum + h_p
+            fs.train_seen += 1
+        if fs.train_seen < env.n_training_symbols:
+            return                      # run incomplete; nothing usable yet
+        fs.h_data = fs.h_data_sum / env.n_training_symbols
+        fs.h_pilots = fs.h_pilots_sum / env.n_training_symbols
         # Needed by the thresh_w/thresh_wq metrics, which compare
         # n_data*|H[k]|^2 against this sum -- the RTL's own comparison
         # (llr_weight.v), so it must come from the TRAINING estimate and
@@ -190,6 +237,10 @@ class RxFreqDomain(Block):
         fs.train_h2_sum = xp.sum(xp.abs(fs.h_data) ** 2, axis=-1)
 
     # ---- the header --------------------------------------------------
+
+    def is_finished(self, frame_id: int) -> bool:
+        """Has this frame already completed or been abandoned?"""
+        return frame_id in self.finished or frame_id in self.invalidated
 
     def decode_header(self, batch: FftBatch) -> HeaderConfig:
         """Equalize, BPSK-demap and DECODE the header, in this stage.
@@ -327,10 +378,15 @@ class RxFreqDomain(Block):
         env, xp = self.env, self.env.xp
         if not self._live(batch.frame_id):
             return []
-        fs = self._frames[batch.frame_id]
+        fs = self._frames.get(batch.frame_id)
+        if fs is None or fs.header is None:
+            # Either surplus past a finished frame (TD overshoots on
+            # purpose) or a frame whose header never decoded. Neither is
+            # an error for this stage to raise -- the header failure was
+            # already counted where it happened.
+            self.stats["dropped_surplus"] += 1
+            return []
         cfg = fs.header
-        if cfg is None:
-            raise RuntimeError(f"frame {batch.frame_id}: body before header")
 
         out: List[LlrBatch] = []
         for i in range(batch.n_sym):

@@ -12,10 +12,11 @@ blocks separated by bounded FIFOs, one thread per block, so the load
 spreads over cores.
 
 `Ofdm` IS NOT TOUCHED. It stays the shipping path and is V2's
-bit-exactness oracle, which is also why V2 reuses `Ofdm`'s own Block
-instances (sync, cfo, demod, grid, equalizer, channel_estimator, Modem,
-Packetizer) unchanged -- V2 changes WHEN they are called and WHO owns the
-state between calls, never the arithmetic.
+bit-exactness oracle. V2 runs the same transforms it does -- sync, CFO,
+FFT, channel estimation, equalization, demapping, Viterbi, RS, CRC -- so
+what changes is WHEN they are called and WHO owns the state between
+calls, never the arithmetic. Each stage constructs its OWN instances of
+those blocks (see `env.py`); only immutable geometry is shared.
 
 THE DATAFLOW IS STRICTLY FORWARD:
 
@@ -282,3 +283,24 @@ class StreamGap(ControlEvent):
 
     sample_offset: int
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class FrameDone(ControlEvent):
+    """`frame_id` is finished downstream; its samples may be released.
+
+    FLOW CONTROL, NOT CONFIGURATION. This travels from BIT back toward
+    TD, which looks like the backward path V2 rejects and is not: it
+    carries no decode information, only "nobody needs these samples any
+    more". It is also strictly optional -- TD bounds every frame's
+    emission at `max_payload_symbols` on its own, so a lost or never-sent
+    FrameDone costs wasted work and never correctness.
+
+    It exists because in the threaded flowgraph TD PUSHES symbols instead
+    of being asked for them, and TD cannot know how long a frame is (that
+    is in the header, which FD reads). Without this it would always run
+    to the cap.
+    """
+
+    frame_id: int
+    ok: bool = True

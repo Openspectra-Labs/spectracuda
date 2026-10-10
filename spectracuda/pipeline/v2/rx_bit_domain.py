@@ -74,8 +74,11 @@ class RxBitDomain(Block):
         self._il2_cache: Dict[int, Any] = {}
         self._frames: Dict[int, _Accum] = {}
         self.invalidated: set = set()
+        self.finished: set = set()
+        self._finished_cap = 256
         self.stats = {"frames_decoded": 0, "decode_failures": 0,
-                      "dropped_invalid": 0, "partial_frames_discarded": 0}
+                      "dropped_invalid": 0, "partial_frames_discarded": 0,
+                      "dropped_surplus": 0}
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -93,8 +96,13 @@ class RxBitDomain(Block):
         self.invalidated.add(frame_id)
 
     def retire(self, frame_id: int) -> None:
+        """Mark the frame finished; see `RxFreqDomain.retire` for why
+        finished and forgotten must differ."""
         self._frames.pop(frame_id, None)
         self.invalidated.discard(frame_id)
+        self.finished.add(frame_id)
+        if len(self.finished) > self._finished_cap:
+            self.finished = set(sorted(self.finished)[-self._finished_cap:])
 
     # ---- the stream --------------------------------------------------
 
@@ -102,6 +110,9 @@ class RxBitDomain(Block):
         """Accumulate a batch; decode and return a result on `last`."""
         if batch.frame_id in self.invalidated:
             self.stats["dropped_invalid"] += 1
+            return None
+        if batch.frame_id in self.finished:
+            self.stats["dropped_surplus"] += 1
             return None
 
         acc = self._frames.setdefault(batch.frame_id, _Accum(batch.frame_id))
