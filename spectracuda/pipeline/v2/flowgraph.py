@@ -200,7 +200,7 @@ class RxFlowgraph:
 
     def __init__(self, env: PhyEnv, *, soft: Optional[SoftConfig] = None,
                  expected_fec: tuple = ("rs_m8", "conv_v27"),
-                 chunk_symbols: int = 1, queue_depth: int = 64) -> None:
+                 chunk_symbols: int = 16, queue_depth: int = 64) -> None:
         self.env = env
         self.chunk_symbols = chunk_symbols
 
@@ -353,18 +353,35 @@ class RxFlowgraph:
             t0 = time.perf_counter()
             progressed = False
             while True:
-                # Clamp to the current region. A batch must never straddle
-                # TRAIN / HEADER / BODY: TD is the only stage that can
-                # label symbols, FD dispatches on that label, and a mixed
-                # batch has no correct label. With chunk_symbols=4 and
-                # n_training_symbols = num_symbols_header = 2, the first
-                # batch covered symbols 0..3 -- training AND header -- was
-                # labelled BODY, and FD was handed body data before any
-                # header existed: 3 of 3 frames lost to header_failed.
-                n = self._clamp_to_region(st["emitted"], self.chunk_symbols)
-                want = st["emitted"] + n
-                if not self.stream.ready(fid, want):
+                # Send what is READY, up to the batch cap -- not exactly
+                # the cap. Asking for an exact count makes a worker stall
+                # whenever fewer have arrived, which made a LARGER batch
+                # size slower than a small one: the opposite of the
+                # intent, and the reason the per-batch overhead could
+                # never be amortized.
+                room = self._clamp_to_region(st["emitted"], self.chunk_symbols)
+                # Never emit past the next detected preamble: nothing
+                # beyond it belongs to this frame, and emitting it is pure
+                # waste (1.8x the needed FFTs, 2.4x the CFO work before
+                # this bound existed). Exact, and needs nothing from any
+                # other stage.
+                limit = self.stream.symbol_limit(fid)
+                if limit >= 0:
+                    room = min(room, max(0, limit - st["emitted"]))
+                    if room <= 0:
+                        self.stream.retire(fid)
+                        self._td_state.pop(fid, None)
+                        break
+                n = self.stream.ready_count(fid, st["emitted"], room)
+                if n <= 0:
                     break
+                # Clamped to the current region: a batch must never
+                # straddle TRAIN / HEADER / BODY, because TD is the only
+                # stage that can label symbols and a mixed batch has no
+                # correct label. (With chunk_symbols=4 and
+                # n_training = n_header = 2, an unclamped first batch
+                # covered symbols 0..3 and was labelled BODY, so FD got
+                # body data before any header: 3 of 3 frames lost.)
                 stype = self._stype_for(st["emitted"], n)
                 try:
                     batch = self.stream.symbols(fid, st["emitted"], n, stype)

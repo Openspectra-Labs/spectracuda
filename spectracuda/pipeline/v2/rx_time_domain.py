@@ -434,6 +434,7 @@ class TdStream:
         xp = self.env.xp
         self.buffer = xp.zeros((1, 0), dtype="complex64")
         self.base_offset = 0          # absolute index of buffer[0]
+        self._scanned_to = 0
         self.active: List[int] = []   # frame_ids still emitting, oldest first
         self._starts: Dict[int, int] = {}   # frame_id -> absolute preamble start
         # Absolute starts already detected, INCLUDING retired frames.
@@ -445,6 +446,14 @@ class TdStream:
         # the samples are gone, since a trimmed preamble can never be
         # re-detected.
         self._seen: set = set()
+        # How far the preamble scan has already looked, ABSOLUTE. Without
+        # this, every feed() re-scanned the whole retained buffer: 6.3x
+        # the signal's samples re-correlated in the serial driver and
+        # 11.9x under threading (where frames stay active longer, so the
+        # buffer is longer). That is quadratic in buffer length and was
+        # the single largest cost in the receiver -- far bigger than the
+        # queue overhead it was mistaken for.
+        self._scanned_to = 0
         self._min_extent = (self.env.n_training_symbols + self.env.num_symbols_header)
         self.stats = {"chunks": 0, "detections": 0, "suppressed_in_frame": 0,
                       "gaps": 0, "capped": 0}
@@ -469,6 +478,7 @@ class TdStream:
                                 reason="declared by caller"))
         self.active.clear()
         self._starts.clear()
+        self._scanned_to = self.base_offset + int(self.buffer.shape[-1]) + int(n_samples)
         self.base_offset += int(self.buffer.shape[-1]) + int(n_samples)
         self.buffer = xp.zeros((1, 0), dtype="complex64")
         self.stats["gaps"] += 1
@@ -540,7 +550,11 @@ class TdStream:
         win = 2 * env.fft_size + L
         stride = env.fft_size
         min_frame = env.fft_size + self._min_extent * env.slot_len
-        cursor = 0
+        # Resume where the last scan stopped, overlapping by one window so
+        # a preamble straddling that boundary is still found whole. `_seen`
+        # already suppresses a re-detection inside the overlap.
+        resume = max(self.base_offset, self._scanned_to - win)
+        cursor = max(0, resume - self.base_offset)
         while cursor < buf_len:
             span = self.buffer[:, cursor:cursor + win]
             if int(span.shape[-1]) < env.fft_size:
@@ -591,6 +605,11 @@ class TdStream:
                 cursor = (absolute - self.base_offset) + min_frame
             else:
                 cursor += stride
+        # Only claim what could actually have been decided: a preamble
+        # needs fft_size + L samples present before it may be accepted,
+        # so anything newer than that must be re-examined next time.
+        self._scanned_to = max(self._scanned_to,
+                               self.base_offset + max(0, buf_len - (env.fft_size + L)))
         return found
 
     def _refine(self, rel_peak: int, buf_len: int) -> int:
@@ -635,6 +654,50 @@ class TdStream:
         need = (self._starts[frame_id] + env.fft_size - env.timing_advance
                 + n_sym * env.slot_len)
         return need <= self.base_offset + int(self.buffer.shape[-1])
+
+    def ready_count(self, frame_id: int, emitted: int, cap: int) -> int:
+        """How many further symbols are ALREADY buffered, up to `cap`.
+
+        The point of asking it this way: TD should send what it has, not
+        wait for a round number. `ready()` answers "are exactly N
+        buffered?", and a worker that asks for exactly N stalls whenever
+        fewer than N have arrived -- which made a large batch size
+        WORSE than a small one instead of better, the opposite of the
+        intent.
+        """
+        env = self.env
+        start = self._starts.get(frame_id)
+        if start is None:
+            return 0
+        base = start + env.fft_size - env.timing_advance + emitted * env.slot_len
+        have = self.base_offset + int(self.buffer.shape[-1]) - base
+        if have <= 0:
+            return 0
+        return max(0, min(cap, have // env.slot_len))
+
+    def symbol_limit(self, frame_id: int) -> int:
+        """Symbols before the NEXT detected frame begins, or -1.
+
+        TD cannot know how long a frame is -- the length is in the header,
+        which FD reads -- so in the flowgraph it overshoots on purpose and
+        lets FD discard the surplus. That overshoot is not free: measured
+        at 1.8x the FFTs actually needed and 2.4x the CFO work, because
+        every extra symbol also re-corrects the frame's span.
+
+        But TD does know something exact without asking anyone: where the
+        next preamble is. Nothing past it belongs to this frame. That
+        bounds the overshoot tightly for back-to-back traffic while
+        `capped()` still bounds it when no next frame ever arrives, so
+        termination stays independent of every other stage.
+        """
+        start = self._starts.get(frame_id)
+        if start is None:
+            return -1
+        later = [s for s in self._seen if s > start]
+        if not later:
+            return -1
+        body_start = start + self.env.fft_size - self.env.timing_advance
+        return max(0, (min(later) - body_start) // self.env.slot_len)
 
     def capped(self, frame_id: int, emitted: int) -> bool:
         """Has this frame emitted everything TD is willing to give it?
