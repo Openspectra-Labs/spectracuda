@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 from spectracuda.pipeline import Ofdm
-from spectracuda.pipeline.v2.env import PhyEnv
+from spectracuda.pipeline.v2.env import PhyConfig, PhyEnv
 from spectracuda.pipeline.v2.rx_bit_domain import RxBitDomain
 from spectracuda.pipeline.v2.rx_freq_domain import RxFreqDomain
 from spectracuda.pipeline.v2.rx_pipeline import RxPipeline
@@ -580,3 +580,94 @@ def test_streaming_recovers_the_payload_at_every_fd_batch_size(chunk_symbols):
     rx = stream_pipeline(o, chunk_symbols=chunk_symbols)
     got = drive(rx, concat(gap(800), o.generate_frame(tx), gap(3000)))
     assert matches(got, tx)
+
+
+# ------------------------------------------------- standalone build ----
+
+def test_standalone_env_matches_the_borrowed_one():
+    """V2 must be constructible WITHOUT an `Ofdm`, and the two routes
+    must agree exactly.
+
+    This is not a formality. `PhyEnv.build()` re-derives the preamble,
+    the training symbol's content and the header's bit positions from
+    seeds, and a mismatch there has no error path: a wrong
+    `preamble_seed` means the receiver never syncs, a wrong
+    `training_seed` means it syncs and decodes nothing. An earlier version
+    of `PhyConfig` defaulted both seeds to 0 instead of `Ofdm`'s 123/999
+    and produced exactly that silent dead link -- caught here, by
+    comparing the derived arrays element by element rather than trusting
+    that two copies of one derivation stayed in step.
+    """
+    o = make_ofdm("qam16")
+    borrowed = PhyEnv.from_ofdm(o)
+    standalone = PhyEnv.build(PhyConfig(
+        fft_size=o.fft_size, cp_len=o.cp_len, n_data=o.grid.n_data,
+        n_pilot=o.grid.n_pilot, n_training_symbols=o.n_training_symbols,
+        interleaver=o.interleaver, interleaver_kwargs=dict(o.interleaver_kwargs),
+        max_payload_symbols=o.MAX_PAYLOAD_SYMBOLS, backend="numpy"))
+
+    assert standalone.slot_len == borrowed.slot_len
+    assert standalone.timing_advance == borrowed.timing_advance
+    assert standalone.num_symbols_header == borrowed.num_symbols_header
+    assert standalone.header_wire_len == borrowed.header_wire_len
+    for name in ("preamble_time", "pilot_values", "train_grid_freq",
+                 "train_known_indices", "train_known_values",
+                 "header_positions_flat"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(standalone, name)),
+            np.asarray(getattr(borrowed, name)),
+            err_msg=f"{name} differs between build() and from_ofdm()")
+    np.testing.assert_array_equal(np.asarray(standalone.grid.data_indices),
+                                  np.asarray(borrowed.grid.data_indices))
+    np.testing.assert_array_equal(np.asarray(standalone.grid.pilot_indices),
+                                  np.asarray(borrowed.grid.pilot_indices))
+
+
+def test_a_standalone_pipeline_decodes_a_frame_from_ofdm():
+    """The point of step 3: V2 stands on its own.
+
+    A receiver built purely from `PhyConfig` -- never having seen the
+    transmitter's object -- recovers a frame `Ofdm` generated, which is
+    also what a real receiver has to do (it is a separate device).
+    """
+    o = make_ofdm("qam16", soft_llr_scale="stream")
+    env = PhyEnv.build(PhyConfig(
+        fft_size=o.fft_size, cp_len=o.cp_len, n_data=o.grid.n_data,
+        n_pilot=o.grid.n_pilot, n_training_symbols=o.n_training_symbols,
+        interleaver=o.interleaver, interleaver_kwargs=dict(o.interleaver_kwargs),
+        max_payload_symbols=o.MAX_PAYLOAD_SYMBOLS, backend="numpy"))
+
+    tx = payload(400, seed=5)
+    rx = RxPipeline(env, soft=soft_config_from(o), expected_fec=(o.fec, o.fec1))
+    got = drive(rx, concat(gap(800), o.generate_frame(tx), gap(3000)))
+    assert matches(got, tx)
+
+
+def test_stages_own_their_blocks_rather_than_sharing_them():
+    """No stateful DSP block may be shared between stages or pipelines.
+
+    "Stateless today" is not a property to rely on across a future
+    optimization -- this project has already added caches to the
+    interleaver, the FEC codecs and the LDPC construction, and
+    `framing/header.py:69` keeps a module-level `_HEADER_PACKETIZER`
+    while `ConvolutionalCode._native_soft` is built lazily with no lock.
+    Sharing is how those become races once threads arrive, so it is
+    checked structurally now rather than debugged later.
+    """
+    env = PhyEnv.from_ofdm(make_ofdm("qam16"))
+    a, b = RxPipeline(env), RxPipeline(env)
+
+    # Across pipelines.
+    for stage, attr in ((("td",), "sync"), (("td",), "cfo"), (("td",), "demod"),
+                        (("fd",), "equalizer"), (("fd",), "channel_estimator"),
+                        (("fd",), "header_modem")):
+        oa = getattr(getattr(a, stage[0]), attr)
+        ob = getattr(getattr(b, stage[0]), attr)
+        assert oa is not ob, f"{stage[0]}.{attr} is shared between pipelines"
+
+    # And the header codec, which wraps a Packetizer.
+    assert a.fd._header_codec is not b.fd._header_codec
+    # TD and FD hold disjoint block sets, so nothing is shared across the
+    # stage boundary either.
+    assert {id(a.td.sync), id(a.td.cfo), id(a.td.demod)}.isdisjoint(
+        {id(a.fd.equalizer), id(a.fd.channel_estimator), id(a.fd.header_modem)})

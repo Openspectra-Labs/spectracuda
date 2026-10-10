@@ -116,6 +116,13 @@ class RxTimeDomain(Block):
     def __init__(self, env: PhyEnv) -> None:
         super().__init__(backend=env.backend)
         self.env = env
+        # TD's OWN blocks, not shared with FD or with another pipeline.
+        # See env.py: a block that later grows a cache -- which is how
+        # this project accelerated the interleaver, the FEC codecs and
+        # the LDPC construction -- would silently become a race.
+        self.sync = env.make_sync()
+        self.cfo = env.make_cfo()
+        self.demod = env.make_demod()
         self._frames: Dict[int, FrameSync] = {}
         self._next_frame_id = 0
         self._candidate: Optional[_Candidate] = None
@@ -161,7 +168,7 @@ class RxTimeDomain(Block):
         rx_iq = self._quantize(rx_iq)
 
         rssi_db = compute_rssi_db(xp, rx_iq)
-        sync_result = env.sync.process(rx_iq)
+        sync_result = self.sync.process(rx_iq)
         start_index = sync_result["start_index"]
         metric = sync_result["metric"]
 
@@ -175,8 +182,8 @@ class RxTimeDomain(Block):
             return {"frame_found": False, "start_index": start_index,
                     "sync_metric": metric, "rssi_db": rssi_db, "frame_id": None}
 
-        cfo_estimate = env.cfo.process(rx_iq, start_index=start_index)
-        rx_corrected = env.cfo.correct(rx_iq, cfo_estimate)
+        cfo_estimate = self.cfo.process(rx_iq, start_index=start_index)
+        rx_corrected = self.cfo.correct(rx_iq, cfo_estimate)
         pos0 = start_index + env.fft_size - env.timing_advance
 
         frame_id = self._next_frame_id
@@ -253,7 +260,7 @@ class RxTimeDomain(Block):
         """
         env, xp = self.env, self.env.xp
         start_arr = xp.asarray([rel])
-        cfo_estimate = env.cfo.process(buffer, start_index=start_arr)
+        cfo_estimate = self.cfo.process(buffer, start_index=start_arr)
         frame_id = self._next_frame_id
         self._next_frame_id += 1
         self._frames[frame_id] = FrameSync(
@@ -288,7 +295,7 @@ class RxTimeDomain(Block):
         span = buffer[:, begin:]
         if int(span.shape[-1]) <= fs.corrected_len:
             return
-        fs.rx_corrected = env.cfo.correct(span, fs.cfo_estimate)
+        fs.rx_corrected = self.cfo.correct(span, fs.cfo_estimate)
         fs.corrected_len = int(span.shape[-1])
 
     def symbols(self, frame_id: int, symbol_offset: int, n_sym: int,
@@ -332,7 +339,7 @@ class RxTimeDomain(Block):
         batch_idx = xp.arange(fs.rx_corrected.shape[0])[:, None, None]
         slots = fs.rx_corrected[batch_idx, idx]                 # (1, n_sym, slot_len)
         flat = slots.reshape(slots.shape[0] * n_sym, env.slot_len)
-        bins = env.demod.process(flat)                          # (n_sym, fft_size)
+        bins = self.demod.process(flat)                          # (n_sym, fft_size)
 
         fs.n_emitted += n_sym
         self.stats["symbols_emitted"] += n_sym
@@ -538,7 +545,7 @@ class TdStream:
             span = self.buffer[:, cursor:cursor + win]
             if int(span.shape[-1]) < env.fft_size:
                 break
-            res = env.sync.process(span)
+            res = self.td.sync.process(span)
             metric = float(np.asarray(self.td._to_host(res["metric"]))[0])
             rel = int(np.asarray(self.td._to_host(res["start_index"]))[0])
             absolute = self.base_offset + cursor + rel

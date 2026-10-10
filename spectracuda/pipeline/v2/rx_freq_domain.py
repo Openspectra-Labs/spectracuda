@@ -112,11 +112,17 @@ class RxFreqDomain(Block):
         super().__init__(backend=env.backend)
         self.env = env
         self.soft = soft or SoftConfig()
-        # Per-stage instances, never shared. `framing/header.py:69` keeps
-        # `_HEADER_PACKETIZER` as a module-level singleton and
-        # `ConvolutionalCode._native_soft` is lazily built with no lock
-        # (`fec/viterbi.py:174,329`), so one object touched by RX-FD and
-        # RX-BIT concurrently is a genuine race.
+        # FD's OWN blocks, never shared with another stage or pipeline.
+        # The hazard is concrete in this codebase, not theoretical:
+        # `framing/header.py:69` keeps `_HEADER_PACKETIZER` as a
+        # module-level singleton, and `ConvolutionalCode._native_soft` is
+        # built lazily with no lock (`fec/viterbi.py:174,329`) around a
+        # libcorrect handle that carries decoder state. One such object
+        # touched by RX-FD and RX-BIT at once is a genuine race, so FD
+        # constructs its own rather than reaching for a shared one.
+        self.equalizer = env.make_equalizer()
+        self.channel_estimator = env.make_channel_estimator()
+        self.header_modem = Modem("bpsk", backend=env.backend)
         self._header_codec = HeaderCodec(scramble_seed=env.header_scramble_seed)
         self._pilot_values = env.pilot_values
         self._cfg_fec0: Optional[str] = None
@@ -170,7 +176,7 @@ class RxFreqDomain(Block):
         h_data_sum = h_pilots_sum = None
         for i in range(batch.n_sym):
             known = batch.bins[i:i + 1, :][:, env.train_known_indices]
-            h_full = env.channel_estimator.process(known)
+            h_full = self.channel_estimator.process(known)
             h_d = h_full[:, env.grid.data_indices]
             h_p = h_full[:, env.grid.pilot_indices]
             h_data_sum = h_d if h_data_sum is None else h_data_sum + h_d
@@ -199,13 +205,13 @@ class RxFreqDomain(Block):
         bits_chunks, eq_chunks = [], []
         for i in range(batch.n_sym):
             rx_data = env.grid.extract_data(xp, batch.bins[i:i + 1, :])
-            eq = env.equalizer.process(rx_data, channel_est=fs.h_data)
-            bits_chunks.append(env.header_modem.demodulate(eq))
+            eq = self.equalizer.process(rx_data, channel_est=fs.h_data)
+            bits_chunks.append(self.header_modem.demodulate(eq))
             eq_chunks.append(eq)
 
         if self.soft.scale == "stream":
             heq = xp.concatenate(eq_chunks, axis=-1)
-            hp, _ = env.header_modem._point_table()
+            hp, _ = self.header_modem._point_table()
             hp = xp.asarray(hp)
             hd = xp.min(xp.abs(heq[..., None] - hp[None, None, :]) ** 2, axis=-1)
             fs.stream_noise = xp.maximum(xp.mean(hd, axis=-1), 1e-12)
@@ -340,7 +346,7 @@ class RxFreqDomain(Block):
                 # ever diverged, segment 0 and segments 1+ would be
                 # estimates of subtly different things while looking
                 # equally plausible.
-                h_full = env.channel_estimator.process(bins[:, env.train_known_indices])
+                h_full = self.channel_estimator.process(bins[:, env.train_known_indices])
                 fs.h_data = h_full[:, env.grid.data_indices]
                 fs.h_pilots = h_full[:, env.grid.pilot_indices]
                 self.stats["dmrs_refreshes"] += 1
@@ -374,10 +380,10 @@ class RxFreqDomain(Block):
         """
         env, xp = self.env, self.env.xp
         rx_data = env.grid.extract_data(xp, bins)
-        eq = env.equalizer.process(rx_data, channel_est=fs.h_data)
+        eq = self.equalizer.process(rx_data, channel_est=fs.h_data)
 
         pilots_rx = env.grid.extract_pilots(xp, bins)
-        eq_pilots = env.equalizer.process(pilots_rx, channel_est=fs.h_pilots)
+        eq_pilots = self.equalizer.process(pilots_rx, channel_est=fs.h_pilots)
         ratio = eq_pilots / xp.tile(self._pilot_values, (eq_pilots.shape[0], 1))
         ratio_mean = xp.mean(ratio, axis=-1)
         cpe = xp.angle(ratio_mean)
